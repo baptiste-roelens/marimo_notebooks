@@ -1,0 +1,16 @@
+[project]
+name = "protein-2nds"
+version = "0.1.0"
+description = "Protein sequence and structure conservation viewer across species"
+requires-python = ">=3.11"
+dependencies = [
+    "marimo>=0.9",
+    "biopython>=1.83",
+    "requests>=2.31",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "pymsaviz>=0.5",
+    "biotite>=0.39",
+    "py3dmol>=2.0",
+]
+
