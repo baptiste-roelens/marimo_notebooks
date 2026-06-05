@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marimo-bio-widget-helpers"
+version = "0.1.0"
+description = "MSA and protein structure visualization helpers for marimo bioinformatics notebooks"
+requires-python = ">=3.11"
+dependencies = [
+    "biopython>=1.83",
+    "matplotlib>=3.7",
+    "pymsaviz>=0.5",
+    "biotite>=0.39",
+]
+
+[tool.setuptools]
+packages = ["widget"]
+
+[tool.setuptools.package-dir]
+"widget" = "."

@@ -1,3 +1,21 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "marimo>=0.9",
+#     "biopython>=1.83",
+#     "requests>=2.31",
+#     "pandas>=2.0",
+#     "matplotlib>=3.7",
+#     "pymsaviz>=0.5",
+#     "biotite>=0.39",
+#     "py3dmol>=2.0",
+#     "marimo-bio-widget-helpers",
+# ]
+#
+# [tool.uv.sources]
+# marimo-bio-widget-helpers = { git = "https://github.com/baptiste-roelens/marimo_notebooks", subdirectory = "widget" }
+# ///
+
 import marimo
 
 __generated_with = "0.23.8"
