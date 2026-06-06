@@ -207,6 +207,50 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
+    mo.md(r"""
+    # Protein Conservation Explorer
+
+    Proteins evolve under constant mutational pressure, yet many retain their function for
+    hundreds of millions of years. Natural selection preserves what matters most: the ability
+    to fold and to carry out a specific biochemical role.
+
+    **The core insight this notebook illustrates:** *structure is more conserved than sequence.*
+    At the sequence level, orthologs can diverge to below 20% identity over long evolutionary
+    timescales while still performing identical functions. At the structural level, the 3D fold
+    is far more constrained — homologous proteins from distantly related organisms often
+    superimpose with Cα RMSD values well below 2 Å even when sequence identity alone would
+    not predict any relationship.
+
+    This notebook lets you explore both levels of conservation side by side for any protein
+    of your choice, using data from **UniProt**, **Clustal Omega** (EBI), and the
+    **AlphaFold Database**.
+
+    ---
+
+    **Workflow**
+
+    1. **Search** for a protein in UniProt Swiss-Prot and pick a reference entry
+    2. **Select orthologs** — the same gene across different organisms
+    3. **Align sequences** with Clustal Omega and explore residue-level conservation
+    4. **Fetch and superimpose** AlphaFold predicted structures; compare RMSD values
+    5. **Visualize** a neighbour-joining phylogenetic tree built from sequence identity
+
+    > **Good proteins to try:** *actin*, *histone H3*, *PCNA* (near-universal conservation);
+    > *cytochrome c*, *ubiquitin* (extreme sequence conservation across eukaryotes);
+    > *globins* (moderate sequence divergence, highly conserved fold — a textbook example
+    > of sequence vs. structure conservation).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("## Step 1 — Search for a protein")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
     protein_name = mo.ui.text(
         placeholder="e.g. Insulin, hemoglobin, Actin …",
         label="Protein name",
@@ -241,6 +285,22 @@ def _(mo, protein_name, search_btn, search_uniprot):
     )
     search_table
     return (search_table,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 2 — Select orthologs to compare
+
+    The table below lists all **reviewed Swiss-Prot entries** carrying the same gene name,
+    each from a different organism. These are the orthologs — proteins that descend from a
+    common ancestral gene and perform the same biological role.
+
+    Select **≥ 2 entries** (checkboxes) to include in the comparison. The **AF structure**
+    column (✓/✗) indicates whether an AlphaFold prediction is available; include entries
+    with ✓ if you want to compare 3D structures downstream.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -306,6 +366,24 @@ def _(mo, ortholog_table):
         mo.callout(mo.md(f"**{_n} orthologs** selected. Scroll down to compute the alignment."), kind="success")
     )
     _status
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 3 — Sequence conservation
+
+    Sequences are aligned using **Clustal Omega** (EBI REST service), a fast progressive
+    multiple aligner. Each column in the resulting alignment corresponds to an equivalent
+    position across all orthologs, and conservation at each column reflects evolutionary
+    constraint.
+
+    After the alignment loads, try the **% Conservation** color scheme — columns shaded in
+    deep blue are invariant (or nearly so) across all species, while pale columns vary freely.
+    Highly conserved columns often correspond to the protein's structural core, active site,
+    or key binding interface.
+    """)
     return
 
 
@@ -400,6 +478,33 @@ def _(
             show_counts=msa_show_counts.value,
         )
     mo.as_html(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 4 — Structural conservation
+
+    Sequences diverge far faster than folds. Below, **AlphaFold Database (AFDB)** predicted
+    structures are fetched for the selected orthologs and superimposed onto the first entry
+    (reference) using **Cα atoms only**. The table shows the **RMSD** (root-mean-square
+    deviation of Cα positions after superimposition) — a direct measure of structural
+    similarity.
+
+    | RMSD | Interpretation |
+    |---|---|
+    | < 1 Å | Nearly identical fold |
+    | 1–3 Å | Structurally similar, local variations |
+    | > 3 Å | Significant structural differences |
+
+    Compare the RMSD values with the sequence identities visible in the alignment above.
+    Even orthologs with strikingly low sequence identity often superimpose with RMSD < 2 Å —
+    a concrete demonstration that **structure is more conserved than sequence**.
+
+    In the viewer, switching **Color mode → B-factor** displays AlphaFold's per-residue
+    confidence score (pLDDT): blue/green = high confidence, red = disordered or uncertain.
+    """)
     return
 
 
@@ -608,6 +713,24 @@ def _(
             b_ranges=b_ranges,
         )
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 5 — Phylogenetic context
+
+    The tree below is reconstructed from the aligned sequences using the **neighbour-joining
+    algorithm** with pairwise identity distances. It provides a rough picture of the
+    evolutionary relationships among the selected orthologs based on sequence alone.
+
+    Branch lengths reflect sequence divergence — long branches indicate rapidly evolving
+    lineages, short branches indicate more conserved ones. Compare the tree topology with
+    known species phylogenies: concordance suggests vertical inheritance, while unexpected
+    groupings can hint at lineage-specific evolutionary pressures or, rarely, horizontal
+    gene transfer.
+    """)
     return
 
 
