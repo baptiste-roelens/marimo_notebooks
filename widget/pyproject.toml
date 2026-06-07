@@ -12,6 +12,7 @@ dependencies = [
     "matplotlib>=3.7",
     "pymsaviz>=0.5",
     "biotite>=0.39",
+    "numpy>=1.24",
 ]
 
 [tool.setuptools]
