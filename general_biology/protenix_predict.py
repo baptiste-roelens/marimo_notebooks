@@ -735,7 +735,18 @@ def _run_inference(
         "--need_atom_confidence", str(atom_conf_ui.value),
     ]
 
-    _env = dict(os.environ, PROTENIX_ROOT_DIR=weights_dir_ui.value)
+    # Protenix's fused LayerNorm CUDA kernel has no prebuilt wheel for every
+    # torch/CUDA/Python combination, so it falls back to JIT-compiling one with
+    # nvcc — which fails wherever only the CUDA *runtime* (no toolkit / no
+    # CUDA_HOME) is available, e.g. most hosted GPU sandboxes. Setting
+    # LAYERNORM_TYPE to anything other than "fast_layernorm" makes Protenix skip
+    # that import entirely and use its plain PyTorch LayerNorm instead — slightly
+    # slower, but avoids the JIT-compile step (and the CUDA_HOME crash) altogether.
+    _env = dict(
+        os.environ,
+        PROTENIX_ROOT_DIR=weights_dir_ui.value,
+        LAYERNORM_TYPE="torch_layernorm",
+    )
 
     with mo.status.spinner("Running Protenix prediction…"):
         _result = subprocess.run(_cmd, env=_env, text=True)
