@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.23.8"
-app = marimo.App(width="full", app_title="AlphaFold3 Prediction Viewer")
+app = marimo.App(width="full", app_title="Structure Prediction Viewer")
 
 
 @app.cell(hide_code=True)
@@ -13,8 +13,11 @@ def _():
 @app.cell(hide_code=True)
 def _():
     from widget.af3_helpers import (
-        group_af3_files,
-        parse_af3_json,
+        detect_prediction_source,
+        group_prediction_files,
+        parse_prediction_json,
+        normalize_summary,
+        normalize_full_data,
         build_confidence_figure,
         compute_ipsae,
     )
@@ -34,9 +37,12 @@ def _():
         build_structure_html,
         compute_ipsae,
         default_color,
+        detect_prediction_source,
         get_b_range,
-        group_af3_files,
-        parse_af3_json,
+        group_prediction_files,
+        normalize_full_data,
+        normalize_summary,
+        parse_prediction_json,
         parse_structure,
         superimpose_all,
     )
@@ -45,15 +51,22 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.output.replace(mo.md(r"""
-    # AlphaFold3 Prediction Viewer
+    # Structure Prediction Viewer
 
-    Explore the output of an **AlphaFold Server / AlphaFold3** folding job: confidence
-    metrics (pTM, ipTM), per-model predicted aligned error (PAE), and the predicted
-    3D structures themselves.
+    Explore the output of a folding job from either **AlphaFold Server / AlphaFold3**
+    or **Protenix**: confidence metrics (pTM, ipTM), per-model predicted aligned error
+    (PAE), ipSAE interface scores, and the predicted 3D structures themselves —
+    side by side, in a single consistent view.
 
-    Upload the job's output files below — model structures (`..._model_N.cif`),
-    confidence summaries (`..._summary_confidences_N.json`) and, optionally, the
-    detailed `..._full_data_N.json` files (needed for the PAE plots).
+    Upload the job's output files below. The naming convention is auto-detected:
+
+    - **AlphaFold3**: model structures (`..._model_N.cif`), confidence summaries
+      (`..._summary_confidences_N.json`) and, optionally, `..._full_data_N.json`.
+    - **Protenix**: model structures (`..._sample_N.cif`), confidence summaries
+      (`..._summary_confidence_sample_N.json`) and, optionally,
+      `..._full_data_sample_N.json`.
+
+    The optional full-data files are needed for the PAE and ipSAE plots.
     """))
     return
 
@@ -63,12 +76,13 @@ def _(mo):
     file_upload = mo.ui.file(
         filetypes=[".cif", ".mmcif", ".json"],
         multiple=True,
-        label="Upload AlphaFold3 output files",
+        label="Upload AlphaFold3 or Protenix output files",
     )
     mo.vstack([
         mo.md(
-            "Select all `model_*.cif`, `summary_confidences_*.json` and "
-            "`full_data_*.json` files for a single folding job."
+            "Select all model/structure, confidence-summary and (optionally)\n"
+            "full-data files for a single folding job — either AlphaFold3 or Protenix\n"
+            "naming is supported, but don't mix the two within one upload."
         ),
         file_upload,
     ])
@@ -76,34 +90,55 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(file_upload, group_af3_files, mo, parse_af3_json, parse_structure):
+def _(
+    detect_prediction_source,
+    file_upload,
+    group_prediction_files,
+    mo,
+    normalize_full_data,
+    normalize_summary,
+    parse_prediction_json,
+    parse_structure,
+):
     mo.stop(
         not file_upload.value,
-        mo.callout(mo.md("Upload AlphaFold3 prediction output files above."), kind="info"),
+        mo.callout(mo.md("Upload AlphaFold3 or Protenix prediction output files above."), kind="info"),
     )
 
     _files = file_upload.value
-    _groups = group_af3_files(_files)
+    _source = detect_prediction_source(_files)
     mo.stop(
-        not _groups,
+        _source is None,
         mo.callout(
             mo.md(
-                "No recognizable AlphaFold3 output files found. Expected names following "
-                "the AlphaFold Server convention, e.g. `fold_x_model_0.cif`, "
-                "`fold_x_summary_confidences_0.json`, `fold_x_full_data_0.json`."
+                "No recognizable prediction output files found. Expected either "
+                "AlphaFold Server naming (e.g. `fold_x_model_0.cif`, "
+                "`fold_x_summary_confidences_0.json`, `fold_x_full_data_0.json`) or "
+                "Protenix naming (e.g. `job_sample_0.cif`, "
+                "`job_summary_confidence_sample_0.json`, `job_full_data_sample_0.json`)."
             ),
             kind="warn",
         ),
     )
 
-    with mo.status.spinner("Parsing predicted models…"):
+    _source_label = "AlphaFold3" if _source == "alphafold3" else "Protenix"
+    _groups = group_prediction_files(_files, _source)
+    mo.stop(
+        not _groups,
+        mo.callout(
+            mo.md(f"Could not pair up {_source_label} model structures with confidence summaries."),
+            kind="warn",
+        ),
+    )
+
+    with mo.status.spinner(f"Parsing predicted {_source_label} models…"):
         _parsed = []
         for _idx, _grp in sorted(_groups.items()):
             try:
-                _summary = parse_af3_json(_grp["summary"].contents)
+                _summary = normalize_summary(parse_prediction_json(_grp["summary"].contents), _source)
                 _atoms = parse_structure(_grp["model"].contents, _grp["model"].name)
                 _full_data = (
-                    parse_af3_json(_grp["full_data"].contents)
+                    normalize_full_data(parse_prediction_json(_grp["full_data"].contents), _source)
                     if "full_data" in _grp else None
                 )
             except Exception as _e:
@@ -127,20 +162,20 @@ def _(file_upload, group_af3_files, mo, parse_af3_json, parse_structure):
     for _rank, _m in enumerate(_parsed, start=1):
         _m["rank"] = _rank
 
-    af3_models = _parsed
+    prediction_models = _parsed
     mo.callout(
-        mo.md(f"Parsed **{len(af3_models)}** predicted model(s)."),
+        mo.md(f"Parsed **{len(prediction_models)}** predicted {_source_label} model(s)."),
         kind="success",
     )
-    return (af3_models,)
+    return (prediction_models,)
 
 
 @app.cell(hide_code=True)
-def _(af3_models, mo):
+def _(prediction_models, mo):
     import pandas as _pd
 
     _rows = []
-    for _m in af3_models:
+    for _m in prediction_models:
         _s = _m["summary"]
         _rows.append({
             "Rank": _m["rank"],
@@ -162,7 +197,7 @@ def _(af3_models, mo):
             "**ipTM** (interface pTM) applies the same idea to *inter-chain interfaces* and "
             "is the key signal for multi-chain complexes — above ~0.8 indicates a confident "
             "interface, below ~0.6 suggests the chains may not actually interact this way. "
-            "Models are ranked by AlphaFold3's combined **ranking score**."
+            "Models are ranked by the tool's combined **ranking score**."
         ),
         mo.ui.table(_df, selection=None),
     ])
@@ -170,10 +205,10 @@ def _(af3_models, mo):
 
 
 @app.cell(hide_code=True)
-def _(af3_models, build_confidence_figure, mo):
+def _(prediction_models, build_confidence_figure, mo):
     _figs = [
         mo.as_html(build_confidence_figure(_m["index"], _m["summary"], _m["full_data"], rank=_m["rank"]))
-        for _m in af3_models
+        for _m in prediction_models
         if _m["full_data"] is not None
     ]
 
@@ -189,12 +224,12 @@ def _(af3_models, build_confidence_figure, mo):
         _m["full_data"] is not None
         and _m["summary"].get("chain_pair_iptm") is not None
         and len(_m["summary"]["chain_pair_iptm"]) > 2
-        for _m in af3_models
+        for _m in prediction_models
     )
 
     _intro = (
         "### Predicted aligned error (PAE)\n\n"
-        "Cell *(i, j)* shows AlphaFold3's expected position error (in Å) for residue *j* "
+        "Cell *(i, j)* shows the model's expected position error (in Å) for residue *j* "
         "when the prediction is aligned on residue *i*. Dark green blocks on the diagonal "
         "indicate well-resolved chains/domains; dark green *off-diagonal* blocks indicate "
         "confidently predicted relative arrangements between chains."
@@ -212,8 +247,8 @@ def _(af3_models, build_confidence_figure, mo):
 
 
 @app.cell(hide_code=True)
-def _(af3_models, mo):
-    _has_full_data = any(_m["full_data"] is not None for _m in af3_models)
+def _(prediction_models, mo):
+    _has_full_data = any(_m["full_data"] is not None for _m in prediction_models)
     mo.stop(
         not _has_full_data,
         mo.callout(mo.md("Upload the `..._full_data_N.json` files to compute ipSAE."), kind="info"),
@@ -243,11 +278,11 @@ def _(af3_models, mo):
 
 
 @app.cell(hide_code=True)
-def _(af3_models, compute_ipsae, ipsae_cutoff, mo):
+def _(prediction_models, compute_ipsae, ipsae_cutoff, mo):
     import pandas as _pd
 
     _rows = []
-    for _m in af3_models:
+    for _m in prediction_models:
         if _m["full_data"] is None:
             continue
         _scores = compute_ipsae(
@@ -271,11 +306,11 @@ def _(af3_models, compute_ipsae, ipsae_cutoff, mo):
 
 
 @app.cell(hide_code=True)
-def _(af3_models, atoms_to_pdb_str, get_b_range, mo, superimpose_all):
+def _(prediction_models, atoms_to_pdb_str, get_b_range, mo, superimpose_all):
     import pandas as _pd
 
-    _atoms_list = [m["atoms"] for m in af3_models]
-    _labels = [f"Model {m['index']} (rank {m['rank']})" for m in af3_models]
+    _atoms_list = [m["atoms"] for m in prediction_models]
+    _labels = [f"Model {m['index']} (rank {m['rank']})" for m in prediction_models]
 
     with mo.status.spinner("Superimposing predicted models on Cα atoms…"):
         _aligned, _rmsds = superimpose_all(_atoms_list)

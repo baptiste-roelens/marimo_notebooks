@@ -6,44 +6,112 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Two naming conventions are supported: the AlphaFold Server / AlphaFold3 convention
+# (e.g. fold_<name>_model_0.cif, fold_<name>_summary_confidences_0.json, ...) and
+# Protenix's (e.g. <name>_sample_0.cif, <name>_summary_confidence_sample_0.json, ...).
+# The patterns are mutually exclusive by construction (Protenix always interposes
+# "sample_" between the role and the index), so a file can be classified without
+# first knowing which tool produced it.
 _FILE_PATTERNS = {
-    "model":     re.compile(r"model_(\d+)\.cif$", re.IGNORECASE),
-    "summary":   re.compile(r"summary_confidences_(\d+)\.json$", re.IGNORECASE),
-    "full_data": re.compile(r"full_data_(\d+)\.json$", re.IGNORECASE),
+    ("alphafold3", "model"):     re.compile(r"model_(\d+)\.cif$", re.IGNORECASE),
+    ("alphafold3", "summary"):   re.compile(r"summary_confidences_(\d+)\.json$", re.IGNORECASE),
+    ("alphafold3", "full_data"): re.compile(r"full_data_(\d+)\.json$", re.IGNORECASE),
+    ("protenix",   "model"):     re.compile(r"_sample_(\d+)\.cif$", re.IGNORECASE),
+    ("protenix",   "summary"):   re.compile(r"summary_confidence_sample_(\d+)\.json$", re.IGNORECASE),
+    ("protenix",   "full_data"): re.compile(r"full_data_sample_(\d+)\.json$", re.IGNORECASE),
 }
 
 
-def classify_af3_file(filename: str):
-    """Identify an AlphaFold3 output file's role and model index from its name.
+def classify_prediction_file(filename: str):
+    """Identify a structure-prediction output file's source, role and index from its name.
 
-    Returns (kind, index) where kind is "model", "summary" or "full_data",
-    or (None, None) if the filename doesn't match the AF3 server naming convention
-    (e.g. fold_<name>_model_0.cif, fold_<name>_summary_confidences_0.json, ...).
+    Returns (source, kind, index) where source is "alphafold3" or "protenix" and kind is
+    "model", "summary" or "full_data", or (None, None, None) if the filename doesn't match
+    either tool's output naming convention.
     """
-    for kind, pattern in _FILE_PATTERNS.items():
+    for (source, kind), pattern in _FILE_PATTERNS.items():
         m = pattern.search(filename)
         if m:
-            return kind, int(m.group(1))
-    return None, None
+            return source, kind, int(m.group(1))
+    return None, None, None
 
 
-def group_af3_files(files):
-    """Group uploaded files by predicted-model index.
+def detect_prediction_source(files):
+    """Infer which tool ("alphafold3" or "protenix") produced a set of uploaded files.
+
+    Returns the source name, or None if no file matches a recognized naming convention.
+    """
+    for f in files:
+        source, _kind, _idx = classify_prediction_file(f.name)
+        if source is not None:
+            return source
+    return None
+
+
+def group_prediction_files(files, source):
+    """Group uploaded files of the given source by predicted-model index.
 
     Returns {model_index: {"model": FileInfo, "summary": FileInfo, "full_data": FileInfo}},
-    keeping only indices for which both a structure and a summary file were found.
+    keeping only indices for which both a structure and a summary file were found, and
+    ignoring any files that don't match `source`'s naming convention.
     """
     groups: dict[int, dict] = {}
     for f in files:
-        kind, idx = classify_af3_file(f.name)
-        if kind is None:
+        f_source, kind, idx = classify_prediction_file(f.name)
+        if f_source != source or kind is None:
             continue
         groups.setdefault(idx, {})[kind] = f
     return {idx: g for idx, g in groups.items() if "model" in g and "summary" in g}
 
 
-def parse_af3_json(contents: bytes) -> dict:
+def parse_prediction_json(contents: bytes) -> dict:
     return json.loads(contents.decode("utf-8"))
+
+
+def _chain_letter(asym_id) -> str:
+    """Render a 0-based numeric chain index the way AlphaFold3 labels chains (A, B, … Z, AA, …)."""
+    n = int(asym_id)
+    letters = ""
+    while True:
+        n, rem = divmod(n, 26)
+        letters = chr(ord("A") + rem) + letters
+        if n == 0:
+            return letters
+        n -= 1
+
+
+def normalize_summary(raw: dict, source: str) -> dict:
+    """Map a raw summary-confidence dict onto the AlphaFold3 schema the viewer expects.
+
+    AlphaFold3 and Protenix report most metrics under identical names (ptm, iptm,
+    ranking_score, has_clash, chain_ptm, chain_iptm, chain_pair_iptm, num_recycles, ...).
+    The one rename needed is Protenix's `disorder` → AlphaFold3's `fraction_disordered`
+    for the same headline metric.
+    """
+    summary = dict(raw)
+    if source == "protenix" and "fraction_disordered" not in summary and "disorder" in summary:
+        summary["fraction_disordered"] = summary["disorder"]
+    return summary
+
+
+def normalize_full_data(raw: dict, source: str) -> dict:
+    """Map a raw full-data dict onto the AlphaFold3 schema the viewer expects.
+
+    Protenix names the PAE matrix and per-token chain assignment differently —
+    `token_pair_pae` / `token_asym_id` (integer chain indices) instead of AlphaFold3's
+    `pae` / `token_chain_ids` (letter chain labels) — and its per-atom pLDDT array is
+    `atom_plddt` rather than `atom_plddts`. This aliases them onto AlphaFold3's names
+    so `build_confidence_figure` and `compute_ipsae` work unchanged for both sources.
+    """
+    full_data = dict(raw)
+    if source == "protenix":
+        if "pae" not in full_data and "token_pair_pae" in full_data:
+            full_data["pae"] = full_data["token_pair_pae"]
+        if "token_chain_ids" not in full_data and "token_asym_id" in full_data:
+            full_data["token_chain_ids"] = [_chain_letter(a) for a in full_data["token_asym_id"]]
+        if "atom_plddts" not in full_data and "atom_plddt" in full_data:
+            full_data["atom_plddts"] = full_data["atom_plddt"]
+    return full_data
 
 
 def chain_boundaries(chain_ids):

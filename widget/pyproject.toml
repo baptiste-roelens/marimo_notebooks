@@ -20,3 +20,6 @@ packages = ["widget"]
 
 [tool.setuptools.package-dir]
 "widget" = "."
+
+[tool.marimo.runtime]
+pythonpath = [".."]

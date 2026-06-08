@@ -1,3 +1,21 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "marimo>=0.9",
+#     "biopython>=1.83",
+#     "requests>=2.31",
+#     "pandas>=2.0",
+#     "matplotlib>=3.7",
+#     "pymsaviz>=0.5",
+#     "biotite>=0.39",
+#     "py3dmol>=2.0",
+#     "marimo-bio-widget-helpers",
+# ]
+#
+# [tool.uv.sources]
+# marimo-bio-widget-helpers = { git = "https://github.com/baptiste-roelens/marimo_notebooks", subdirectory = "widget" }
+# ///
+
 import marimo
 
 __generated_with = "0.23.8"
@@ -7,32 +25,41 @@ app = marimo.App(width="full", app_title="Protein Conservation Viewer")
 @app.cell(hide_code=True)
 def _():
     import marimo as mo
-
     return (mo,)
 
 
 @app.cell(hide_code=True)
 def _():
     import time
-    import textwrap
     import functools
-    from io import StringIO
 
     import requests
     import pandas as pd
     import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import biotite.structure as struc
-    import biotite.structure.io.pdb as bpdb
+
+    from widget.msa_helpers import (
+        PYMSAVIZ_SCHEMES,
+        build_msaviz_figure,
+    )
+    from widget.structure_helpers import (
+        BASIC_COLORS,
+        default_color,
+        parse_pdb_str,
+        atoms_to_pdb_str,
+        superimpose_all,
+        compute_tm_score,
+        get_b_range,
+        build_structure_html,
+    )
+
+    # ── UniProt ───────────────────────────────────────────────────────────────
 
     UNIPROT_BASE  = "https://rest.uniprot.org/uniprotkb"
     AFDB_BASE     = "https://alphafold.ebi.ac.uk/api/prediction"
     CLUSTALO_BASE = "https://www.ebi.ac.uk/Tools/services/rest/clustalo"
 
     HEADERS = {"User-Agent": "ProteinConservationViewer/1.0 (contact: user@example.com)"}
-
-    # ── UniProt ───────────────────────────────────────────────────────────────
 
     def _parse_entry(entry: dict) -> dict:
         gene = ""
@@ -67,7 +94,6 @@ def _():
         }
 
     def search_uniprot(query: str, size: int = 10) -> pd.DataFrame:
-        """Free-text search on Swiss-Prot; returns top results."""
         params = {
             "query":  f"({query}) AND reviewed:true",
             "format": "json",
@@ -82,7 +108,6 @@ def _():
         return pd.DataFrame([_parse_entry(e) for e in results])
 
     def get_orthologs_by_gene(gene_name: str, size: int = 100) -> pd.DataFrame:
-        """Return reviewed UniProt entries sharing the same gene name, across all species."""
         params = {
             "query":  f"gene_exact:{gene_name} AND reviewed:true",
             "format": "json",
@@ -100,7 +125,6 @@ def _():
         return df
 
     def get_fasta(accession: str) -> str:
-        """Download FASTA for a single UniProt accession."""
         r = requests.get(f"{UNIPROT_BASE}/{accession}.fasta", headers=HEADERS, timeout=15)
         r.raise_for_status()
         return r.text.strip()
@@ -116,7 +140,6 @@ def _():
             return False
 
     def fetch_pdb(accession: str) -> str | None:
-        """Download PDB-format structure from AFDB, or None if unavailable."""
         try:
             r = requests.get(f"{AFDB_BASE}/{accession}", headers=HEADERS, timeout=10)
             r.raise_for_status()
@@ -135,10 +158,6 @@ def _():
     # ── EBI Clustal Omega ─────────────────────────────────────────────────────
 
     def run_clustalo(fasta_block: str, email: str = "user@example.com") -> str:
-        """
-        Submit sequences to EBI Clustal Omega, poll until done, return aligned FASTA.
-        Blocking — call inside mo.status.spinner().
-        """
         payload = {
             "email":    email,
             "sequence": fasta_block,
@@ -169,122 +188,67 @@ def _():
         rr.raise_for_status()
         return rr.text.strip()
 
-    # ── Structure superimposition ─────────────────────────────────────────────
-
-    def _pdb_str_to_atoms(pdb_text: str):
-        pf = bpdb.PDBFile.read(StringIO(pdb_text))
-        return bpdb.get_structure(pf, model=1)
-
-    def _atoms_to_pdb_str(atoms) -> str:
-        pf = bpdb.PDBFile()
-        bpdb.set_structure(pf, atoms)
-        buf = StringIO()
-        pf.write(buf)
-        return buf.getvalue()
-
-    def superimpose_all(pdb_contents: list[str]) -> tuple[list[str], list[float]]:
-        """
-        Superimpose all structures onto the first using Cα atoms.
-        Returns (transformed_pdb_strings, rmsds_vs_reference).
-        """
-        structures = [_pdb_str_to_atoms(p) for p in pdb_contents]
-        reference  = structures[0]
-        ca_ref     = reference[(reference.atom_name == "CA") & ~reference.hetero]
-
-        out_pdbs = [pdb_contents[0]]
-        rmsds    = []
-
-        for mobile in structures[1:]:
-            ca_mob = mobile[(mobile.atom_name == "CA") & ~mobile.hetero]
-            n = min(len(ca_ref), len(ca_mob))
-            try:
-                _, transform   = struc.superimpose(ca_ref[:n], ca_mob[:n])
-                mobile_t       = transform.apply(mobile)
-                ca_mob_t       = mobile_t[(mobile_t.atom_name == "CA") & ~mobile_t.hetero]
-                rmsd_val       = struc.rmsd(ca_ref[:n], ca_mob_t[:n])
-            except Exception:
-                mobile_t = mobile
-                rmsd_val = float("nan")
-
-            out_pdbs.append(_atoms_to_pdb_str(mobile_t))
-            rmsds.append(float(rmsd_val))
-
-        return out_pdbs, rmsds
-
-    # ── 3Dmol HTML builder ────────────────────────────────────────────────────
-
-    _CHAIN_COLOURS = [
-        "#4e9af1", "#f1a94e", "#e45c3a", "#4eba6f",
-        "#9b59b6", "#1abc9c", "#e74c3c", "#f39c12",
-        "#2980b9", "#27ae60", "#8e44ad", "#c0392b",
-    ]
-
-    def build_3dmol_html(pdb_contents: list[str], labels: list[str]) -> str:
-        import html as _html
-
-        def _js_esc(s: str) -> str:
-            return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-
-        add_models = []
-        for i, (pdb, label) in enumerate(zip(pdb_contents, labels)):
-            colour = _CHAIN_COLOURS[i % len(_CHAIN_COLOURS)]
-            add_models.append(
-                f"viewer.addModel(`{_js_esc(pdb)}`, 'pdb');\n"
-                f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{color:'{colour}'}}}});"
-            )
-        models_js = "\n  ".join(add_models)
-
-        legend_items = " ".join(
-            f'<span style="display:inline-flex;align-items:center;margin-right:10px;">'
-            f'<span style="width:12px;height:12px;background:{_CHAIN_COLOURS[i % len(_CHAIN_COLOURS)]};'
-            f'border-radius:2px;display:inline-block;margin-right:4px;"></span>'
-            f'<span style="font-size:11px;">{_html.escape(label)}</span></span>'
-            for i, label in enumerate(labels)
-        )
-
-        # Build a complete self-contained HTML document.
-        # window.onload fires after the 3Dmol CDN script has loaded,
-        # so $3Dmol is guaranteed to exist by the time createViewer() is called.
-        inner = f"""<!DOCTYPE html>
-    <html><head>
-    <script src='https://3Dmol.csb.pitt.edu/build/3Dmol-min.js'></script>
-    <style>
-      body{{margin:0;padding:0;background:#f8f8f8;font-family:sans-serif;}}
-      #legend{{padding:4px 6px;font-size:11px;}}
-      #v{{position:absolute;top:28px;left:0;right:0;bottom:0;}}
-    </style>
-    </head><body>
-    <div id='legend'>{legend_items}</div>
-    <div id='v'></div>
-    <script>
-    window.addEventListener('load', function() {{
-      var viewer = $3Dmol.createViewer(document.getElementById('v'), {{backgroundColor:'#f8f8f8'}});
-      {models_js}
-      viewer.zoomTo();
-      viewer.render();
-    }});
-    </script>
-    </body></html>"""
-
-        # HTML-escape the whole document for the srcdoc attribute (double-quoted).
-        # The browser will unescape it before parsing, so the JS and PDB content
-        # arrive intact.
-        return (
-            f'<iframe srcdoc="{_html.escape(inner, quote=True)}" '
-            f'style="width:100%;height:540px;border:1px solid #ddd;'
-            f'border-radius:4px;" frameborder="0"></iframe>'
-        )
-
     return (
-        StringIO,
-        build_3dmol_html,
+        BASIC_COLORS,
+        PYMSAVIZ_SCHEMES,
+        atoms_to_pdb_str,
+        build_msaviz_figure,
+        build_structure_html,
+        compute_tm_score,
+        default_color,
         fetch_pdb,
+        get_b_range,
         get_fasta,
         get_orthologs_by_gene,
+        parse_pdb_str,
         run_clustalo,
         search_uniprot,
         superimpose_all,
     )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Protein Conservation Explorer
+
+    Proteins evolve under constant mutational pressure, yet many retain their function for
+    hundreds of millions of years. Natural selection preserves what matters most: the ability
+    to fold and to carry out a specific biochemical role.
+
+    **The core insight this notebook illustrates:** *structure is more conserved than sequence.*
+    At the sequence level, orthologs can diverge to below 20% identity over long evolutionary
+    timescales while still performing identical functions. At the structural level, the 3D fold
+    is far more constrained — homologous proteins from distantly related organisms often
+    superimpose with Cα RMSD values well below 2 Å even when sequence identity alone would
+    not predict any relationship.
+
+    This notebook lets you explore both levels of conservation side by side for any protein
+    of your choice, using data from **UniProt**, **Clustal Omega** (EBI), and the
+    **AlphaFold Database**.
+
+    ---
+
+    **Workflow**
+
+    1. **Search** for a protein in UniProt Swiss-Prot and pick a reference entry
+    2. **Select orthologs** — the same gene across different organisms
+    3. **Align sequences** with Clustal Omega and explore residue-level conservation
+    4. **Fetch and superimpose** AlphaFold predicted structures; compare RMSD values
+    5. **Visualize** a neighbour-joining phylogenetic tree built from sequence identity
+
+    > **Good proteins to try:** *actin*, *histone H3*, *PCNA* (near-universal conservation);
+    > *cytochrome c*, *ubiquitin* (extreme sequence conservation across eukaryotes);
+    > *globins* (moderate sequence divergence, highly conserved fold — a textbook example
+    > of sequence vs. structure conservation).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("## Step 1 — Search for a protein")
+    return
 
 
 @app.cell(hide_code=True)
@@ -321,8 +285,24 @@ def _(mo, protein_name, search_btn, search_uniprot):
         label="Select the reference protein (one row)",
         pagination=True,
     )
-    search_table  # bare expression → last_expr → displayed
+    search_table
     return (search_table,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 2 — Select orthologs to compare
+
+    The table below lists all **reviewed Swiss-Prot entries** carrying the same gene name,
+    each from a different organism. These are the orthologs — proteins that descend from a
+    common ancestral gene and perform the same biological role.
+
+    Select **≥ 2 entries** (checkboxes) to include in the comparison. The **AF structure**
+    column (✓/✗) indicates whether an AlphaFold prediction is available; include entries
+    with ✓ if you want to compare 3D structures downstream.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -360,7 +340,6 @@ def _(get_orthologs_by_gene, mo, search_table):
 
 @app.cell(hide_code=True)
 def _(display_df, mo, orthologs_df, ref_acc, ref_gene):
-    # Direct variable references so marimo's AST tracker sees them as deps
     _n   = len(orthologs_df)
     _acc = ref_acc
     _gen = ref_gene
@@ -374,7 +353,7 @@ def _(display_df, mo, orthologs_df, ref_acc, ref_gene):
         pagination=True,
         page_size=20,
     )
-    ortholog_table  # bare expression → last_expr → displayed
+    ortholog_table
     return (ortholog_table,)
 
 
@@ -394,16 +373,31 @@ def _(mo, ortholog_table):
 
 @app.cell(hide_code=True)
 def _(mo):
+    mo.md(r"""
+    ### Step 3 — Sequence conservation
+
+    Sequences are aligned using **Clustal Omega** (EBI REST service), a fast progressive
+    multiple aligner. Each column in the resulting alignment corresponds to an equivalent
+    position across all orthologs, and conservation at each column reflects evolutionary
+    constraint.
+
+    After the alignment loads, try the **% Conservation** color scheme — columns shaded in
+    deep blue are invariant (or nearly so) across all species, while pale columns vary freely.
+    Highly conserved columns often correspond to the protein's structural core, active site,
+    or key binding interface.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
     align_btn = mo.ui.run_button(label="Compute alignment (Clustal Omega)", kind="success")
-    align_btn  # bare expression → displayed
+    align_btn
     return (align_btn,)
 
 
 @app.cell(hide_code=True)
-def _(StringIO, align_btn, get_fasta, mo, ortholog_table, run_clustalo):
-    from Bio import AlignIO
-    import pymsaviz
-
+def _(align_btn, get_fasta, mo, ortholog_table, run_clustalo):
     mo.stop(
         not align_btn.value,
         mo.callout(mo.md("Click **Compute alignment** to run Clustal Omega."), kind="info"),
@@ -436,28 +430,112 @@ def _(StringIO, align_btn, get_fasta, mo, ortholog_table, run_clustalo):
         except Exception as _err:
             mo.stop(True, mo.callout(mo.md(f"Clustal Omega failed: {_err}"), kind="danger"))
 
-    import math as _math
-    _msa_obj  = AlignIO.read(StringIO(aligned_fasta), "fasta")
-    _n_seqs   = len(_msa_obj)
-    _n_blocks = _math.ceil(_msa_obj.get_alignment_length() / 80)
-    _msaviz   = pymsaviz.MsaViz(
-        _msa_obj,
-        color_scheme="Clustal",
-        show_consensus=True,
-        show_count=True,
-        wrap_length=80,
+    mo.callout(
+        mo.md(f"Alignment complete — **{len(_sel_accs)} sequences**."),
+        kind="success",
     )
-    _fig = _msaviz.plotfig()
-    _fig.set_size_inches(14, max(4, _n_blocks * (_n_seqs * 0.4 + 2.5)))
-    mo.vstack([
-        mo.callout(mo.md(f"Alignment complete — **{len(_sel_accs)} sequences**."), kind="success"),
-        mo.as_html(_fig),
-    ])  # bare expression → displayed
     return (aligned_fasta,)
 
 
 @app.cell(hide_code=True)
-def _(fetch_pdb, mo, ortholog_table, orthologs_df, superimpose_all):
+def _(mo, aligned_fasta, PYMSAVIZ_SCHEMES):
+    mo.stop(
+        not aligned_fasta,
+        mo.callout(mo.md("Compute alignment first."), kind="info"),
+    )
+    msa_color_scheme = mo.ui.dropdown(
+        PYMSAVIZ_SCHEMES, value="Clustal", label="Color scheme"
+    )
+    msa_wrap_length = mo.ui.slider(
+        40, 200, value=80, step=10, label="Wrap length", show_value=True
+    )
+    msa_show_consensus = mo.ui.checkbox(True, label="Show consensus")
+    msa_show_counts = mo.ui.checkbox(True, label="Show counts")
+    mo.hstack([msa_color_scheme, msa_wrap_length, msa_show_consensus, msa_show_counts], gap=2)
+    return msa_color_scheme, msa_wrap_length, msa_show_consensus, msa_show_counts
+
+
+@app.cell(hide_code=True)
+def _(
+    mo,
+    aligned_fasta,
+    msa_color_scheme,
+    msa_wrap_length,
+    msa_show_consensus,
+    msa_show_counts,
+    build_msaviz_figure,
+):
+    from Bio import AlignIO as _AlignIO
+    from io import StringIO as _StringIO
+
+    mo.stop(not aligned_fasta, mo.callout(mo.md("Compute alignment first."), kind="info"))
+    _alignment = _AlignIO.read(_StringIO(aligned_fasta), "fasta")
+
+    with mo.status.spinner("Rendering alignment…"):
+        _fig = build_msaviz_figure(
+            _alignment,
+            color_scheme=msa_color_scheme.value,
+            wrap_length=msa_wrap_length.value,
+            show_consensus=msa_show_consensus.value,
+            show_counts=msa_show_counts.value,
+        )
+    mo.as_html(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Step 4 — Structural conservation
+
+    Sequences diverge far faster than folds. Below, **AlphaFold Database (AFDB)** predicted
+    structures are fetched for the selected orthologs and superimposed onto the first entry
+    (reference) using **Cα atoms only**. The table reports two complementary similarity
+    measures:
+
+    - **RMSD** (root-mean-square deviation of Cα positions after superimposition) is the
+      classic, intuitive measure — but it is dominated by the worst-aligned residues (e.g. a
+      single flexible loop can inflate it) and is not directly comparable across proteins of
+      different lengths. Treat it as illustrative.
+    - **TM-score** is normalised by chain length and saturates with distance, so a few poorly
+      aligned residues barely move it — it tracks *overall fold* similarity much more robustly
+      and is comparable across different proteins. It ranges from 0 to 1.
+
+    | RMSD | Interpretation |
+    |---|---|
+    | < 2 Å | Highly similar fold |
+    | 2–4 Å | Similar fold, local variations (loops, termini, flexible regions) |
+    | > 4 Å | Substantial structural differences |
+
+    | TM-score | Interpretation |
+    |---|---|
+    | > 0.5 | (Roughly) the same fold |
+    | 0.2–0.5 | Possibly related fold |
+    | < 0.2 | Likely unrelated structures |
+
+    Compare these values with the sequence identities visible in the alignment above.
+    Even orthologs with strikingly low sequence identity often superimpose with RMSD a few Å
+    and TM-score well above 0.5 — a concrete demonstration that **structure is more conserved
+    than sequence**.
+
+    In the viewer, switching **Color mode → B-factor** displays AlphaFold's per-residue
+    confidence score (pLDDT): blue/green = high confidence, red = disordered or uncertain.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    atoms_to_pdb_str,
+    compute_tm_score,
+    fetch_pdb,
+    get_b_range,
+    mo,
+    ortholog_table,
+    orthologs_df,
+    parse_pdb_str,
+    superimpose_all,
+):
     import pandas as _pd
 
     _sel = ortholog_table.value
@@ -495,37 +573,195 @@ def _(fetch_pdb, mo, ortholog_table, orthologs_df, superimpose_all):
     )
 
     with mo.status.spinner("Superimposing structures on Cα atoms…"):
-        struct_pdbs, _rmsds = superimpose_all(_pdbs_raw)
+        _atoms_list    = [parse_pdb_str(p) for p in _pdbs_raw]
+        _aligned_atoms, _rmsds = superimpose_all(_atoms_list)
+        struct_pdbs    = [atoms_to_pdb_str(a) for a in _aligned_atoms]
+        b_ranges       = [get_b_range(a) for a in _aligned_atoms]
+        _tm_scores     = [
+            compute_tm_score(_aligned_atoms[0], _mobile)
+            for _mobile in _aligned_atoms[1:]
+        ]
 
     _rmsd_df = _pd.DataFrame({
         "Gene | Organism":  struct_labels,
-        "RMSD vs ref (Å)": [round(v, 2) for v in [0.0] + _rmsds],
+        "RMSD vs ref (Å)": [
+            round(v, 2) if v == v else "N/A"
+            for v in [0.0] + _rmsds
+        ],
+        "TM-score vs ref": [
+            round(v, 2) if v == v else "N/A"
+            for v in [1.0] + _tm_scores
+        ],
     })
-    struct_table = mo.ui.table(
-        _rmsd_df,
-        selection="multi",
-        label=f"**{len(struct_pdbs)}** structure(s) superimposed — select rows to display in the viewer:",
-    )
-    struct_table  # bare expression → displayed
-    return struct_labels, struct_pdbs, struct_table
+    mo.vstack([
+        mo.callout(
+            mo.md(
+                f"**{len(struct_pdbs)}** structure(s) superimposed. "
+                f"Reference: **{struct_labels[0]}**"
+            ),
+            kind="success",
+        ),
+        mo.ui.table(_rmsd_df, selection=None),
+    ])
+    return b_ranges, struct_labels, struct_pdbs
 
 
 @app.cell(hide_code=True)
-def _(build_3dmol_html, mo, struct_labels, struct_pdbs, struct_table):
-    _sel = struct_table.value
-    mo.stop(
-        len(_sel) == 0,
-        mo.callout(mo.md("Select one or more structures in the table above to display them."), kind="info"),
+def _(mo, struct_labels, BASIC_COLORS, default_color):
+    _n = len(struct_labels)
+    _color_names = list(BASIC_COLORS.keys())
+
+    # ── Global controls ────────────────────────────────────────────────────────
+    global_visible = mo.ui.dropdown(
+        ["Show all", "Hide all", "Custom"],
+        value="Show all",
+        label="Visibility",
     )
-    # Map selected rows back to PDB list by label name
-    _sel_labels = _sel["Gene | Organism"].tolist()
-    _sel_pdbs   = [struct_pdbs[struct_labels.index(lbl)] for lbl in _sel_labels]
-    mo.Html(build_3dmol_html(_sel_pdbs, _sel_labels))
+    global_color_mode = mo.ui.dropdown(
+        ["Individual", "Solid color", "B-factor"],
+        value="Individual",
+        label="Color mode",
+    )
+    global_color = mo.ui.dropdown(
+        ["Individual"] + _color_names,
+        value="Individual",
+        label="Color",
+    )
+
+    # ── Per-structure controls ─────────────────────────────────────────────────
+    visible_controls = mo.ui.array(
+        [mo.ui.checkbox(True) for _ in range(_n)]
+    )
+    color_mode_controls = mo.ui.array(
+        [mo.ui.dropdown(["Solid color", "B-factor"], value="Solid color")
+         for _ in range(_n)]
+    )
+    color_controls = mo.ui.array(
+        [mo.ui.dropdown(_color_names, value=default_color(i)) for i in range(_n)]
+    )
+
+    # ── Layout ─────────────────────────────────────────────────────────────────
+    _global_row = mo.hstack(
+        [
+            mo.md("**All structures:**"),
+            global_visible,
+            global_color_mode,
+            global_color,
+        ],
+        gap=2,
+        align="center",
+    )
+
+    _header = mo.hstack(
+        [
+            mo.Html('<div style="min-width:220px;max-width:220px;font-weight:600;font-size:13px;">Structure</div>'),
+            mo.Html('<div style="min-width:36px;font-weight:600;font-size:13px;">Vis.</div>'),
+            mo.Html('<div style="min-width:155px;font-weight:600;font-size:13px;">Color mode</div>'),
+            mo.Html('<div style="font-weight:600;font-size:13px;">Solid color</div>'),
+        ],
+        gap=1,
+        align="center",
+    )
+
+    _rows = [
+        mo.hstack(
+            [
+                mo.Html(
+                    f'<div style="min-width:220px;max-width:220px;'
+                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+                    f'font-family:monospace;font-size:13px;" title="{struct_labels[i]}">'
+                    f'{struct_labels[i]}</div>'
+                ),
+                visible_controls[i],
+                color_mode_controls[i],
+                color_controls[i],
+            ],
+            gap=1,
+            align="center",
+        )
+        for i in range(_n)
+    ]
+
+    mo.vstack([
+        mo.md("### Structure controls"),
+        _global_row,
+        mo.Html("<hr style='margin:6px 0;border:none;border-top:1px solid #e0e0e0;'>"),
+        _header,
+        *_rows,
+    ])
+    return color_controls, color_mode_controls, visible_controls, global_visible, global_color_mode, global_color
+
+
+@app.cell(hide_code=True)
+def _(
+    BASIC_COLORS,
+    b_ranges,
+    build_structure_html,
+    color_controls,
+    color_mode_controls,
+    global_color,
+    global_color_mode,
+    global_visible,
+    mo,
+    struct_labels,
+    struct_pdbs,
+    visible_controls,
+):
+    _n = len(struct_labels)
+
+    if global_visible.value == "Show all":
+        _visibilities = [True] * _n
+    elif global_visible.value == "Hide all":
+        _visibilities = [False] * _n
+    else:
+        _visibilities = visible_controls.value
+
+    _color_modes = (
+        color_mode_controls.value
+        if global_color_mode.value == "Individual"
+        else [global_color_mode.value] * _n
+    )
+
+    _hex_colors = (
+        [BASIC_COLORS[c] for c in color_controls.value]
+        if global_color.value == "Individual"
+        else [BASIC_COLORS[global_color.value]] * _n
+    )
+
+    mo.Html(
+        build_structure_html(
+            pdb_contents=struct_pdbs,
+            labels=struct_labels,
+            visibilities=_visibilities,
+            color_modes=_color_modes,
+            colors=_hex_colors,
+            b_ranges=b_ranges,
+        )
+    )
     return
 
 
 @app.cell(hide_code=True)
-def _(StringIO, aligned_fasta, mo):
+def _(mo):
+    mo.md(r"""
+    ### Step 5 — Phylogenetic context
+
+    The tree below is reconstructed from the aligned sequences using the **neighbour-joining
+    algorithm** with pairwise identity distances. It provides a rough picture of the
+    evolutionary relationships among the selected orthologs based on sequence alone.
+
+    Branch lengths reflect sequence divergence — long branches indicate rapidly evolving
+    lineages, short branches indicate more conserved ones. Compare the tree topology with
+    known species phylogenies: concordance suggests vertical inheritance, while unexpected
+    groupings can hint at lineage-specific evolutionary pressures or, rarely, horizontal
+    gene transfer.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(aligned_fasta, mo):
+    from io import StringIO
     from Bio import AlignIO as _AlignIO
     from Bio import Phylo as _Phylo
     from Bio.Phylo.TreeConstruction import DistanceCalculator as _DistCalc

@@ -1,6 +1,7 @@
 import html as _html
 from io import StringIO
 
+import numpy as np
 import biotite.structure as struc
 import biotite.structure.io.pdb as bpdb
 from biotite.structure.io.pdbx import CIFFile, get_structure as _get_structure_cif
@@ -83,6 +84,32 @@ def superimpose_all(structures: list) -> tuple[list, list[float]]:
         rmsds.append(rmsd)
 
     return out, rmsds
+
+
+def compute_tm_score(ref_atoms, mobile_atoms) -> float:
+    """TM-score between two already-superimposed structures' Cα traces.
+
+    Unlike RMSD, TM-score (Zhang & Skolnick, Proteins 2004) is normalised by the
+    reference structure's length and saturates with distance, so it stays
+    comparable across proteins of different sizes and is far less sensitive to
+    a handful of poorly-aligned (e.g. flexible/disordered) residues — making it
+    a more robust measure of overall fold similarity than RMSD:
+
+        TM = (1 / L_ref) * Σ 1 / (1 + (d_i / d0)²)
+
+    where d0 grows with chain length (floored at 0.5 Å). Scores range 0–1;
+    > 0.5 generally indicates the same fold.
+    """
+    ca_ref = ref_atoms[(ref_atoms.atom_name == "CA") & ~ref_atoms.hetero]
+    ca_mob = mobile_atoms[(mobile_atoms.atom_name == "CA") & ~mobile_atoms.hetero]
+    n = min(len(ca_ref), len(ca_mob))
+    if n == 0:
+        return float("nan")
+
+    d = np.sqrt(((ca_ref.coord[:n] - ca_mob.coord[:n]) ** 2).sum(axis=1))
+    l_ref = len(ca_ref)
+    d0 = max(0.5, 1.24 * (l_ref - 15.0) ** (1.0 / 3.0) - 1.8) if l_ref > 15 else 0.5
+    return float(np.mean(1.0 / (1.0 + (d / d0) ** 2)))
 
 
 def get_b_range(atoms) -> tuple[float, float]:

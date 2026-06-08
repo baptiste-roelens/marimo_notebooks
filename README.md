@@ -8,8 +8,8 @@ A collection of interactive [marimo](https://marimo.io) notebooks for common bio
 
 | Notebook | Description | Open |
 |----------|-------------|------|
-| [Protein Conservation Viewer](general_biology/protein_conservation.py) | Fetches orthologs from UniProt, aligns sequences with ClustalOmega, visualizes the MSA and superimposed AlphaFold structures, and builds a neighbour-joining phylogenetic tree. | [![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/notebooks/nb_KcmBSS9c8C6fFMjVrYf48K) |
-| [Protein Conservation Viewer v2](general_biology/protein_conservation_v2.py) | Variant of the above with interactive MSA color schemes (including % conservation) and per-structure show/hide and B-factor coloring controls. | |
+| [Protein Conservation Viewer](general_biology/protein_conservation.py) | Fetches orthologs from UniProt, aligns sequences with ClustalOmega, and compares them on both axes of conservation: an interactive MSA (with selectable color schemes, including % conservation) and superimposed AlphaFold structures (RMSD and TM-score, per-structure show/hide and B-factor coloring), plus a neighbour-joining phylogenetic tree. | |
+| [Protein Conservation Viewer (no widget)](general_biology/protein_conservation_no_widget.py) | Self-contained variant of the above that doesn't depend on the local `widget/` helpers — useful as a single-file reference or when running somewhere the `widget` package isn't available. | |
 
 ### Widgets
 
@@ -53,7 +53,7 @@ uv run marimo edit <notebook.py>
 Managed with [uv](https://docs.astral.sh/uv/). Install and run in one step:
 
 ```bash
-uv run marimo run general_biology/protein_conservation_v2.py
+uv run marimo run general_biology/protein_conservation.py
 ```
 
 Key dependencies: `marimo`, `biopython`, `pymsaviz`, `biotite`, `requests`, `pandas`, `matplotlib`.
