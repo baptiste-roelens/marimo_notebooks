@@ -60,6 +60,56 @@ def chain_boundaries(chain_ids):
     return bounds
 
 
+def _ptm_score(pae, d0):
+    return 1.0 / (1.0 + (pae / d0) ** 2.0)
+
+
+def _d0_array(n_residues):
+    """Per-residue d0 normalisation (Yang & Skolnick, Proteins 2004), array form
+    matching the reference ipsae.py implementation (residue counts floored at 26)."""
+    n_residues = np.maximum(26.0, np.asarray(n_residues, dtype=float))
+    return np.maximum(1.0, 1.24 * (n_residues - 15.0) ** (1.0 / 3.0) - 1.8)
+
+
+def compute_ipsae(pae, chain_ids, pae_cutoff=10.0):
+    """Compute the ipSAE interface-confidence score for every pair of chains.
+
+    ipSAE (Dunbrack et al., https://doi.org/10.1101/2025.02.10.637595) refines AlphaFold's
+    ipTM for assessing inter-chain interfaces by (1) discarding residue pairs whose
+    predicted aligned error exceeds `pae_cutoff` and (2) normalising per residue by how
+    many partner-chain residues are confidently placed relative to it. This makes it more
+    sensitive to confidently predicted sub-interfaces in larger or partly-disordered
+    assemblies than the global ipTM. Unlike ipTM it depends only on the PAE matrix and
+    chain assignment — no 3D coordinates are required.
+
+    Returns {(chain_a, chain_b): score} for every unordered chain pair (chain_a < chain_b),
+    where score is the symmetrized maximum of the two directional (A→B and B→A) values —
+    matching the headline "max" value reported by the reference `ipsae.py` tool.
+    """
+    pae = np.asarray(pae, dtype=float)
+    chains = np.asarray(chain_ids)
+    unique_chains = sorted(set(chain_ids))
+
+    def _directional(c1, c2):
+        mask1 = chains == c1
+        mask2 = chains == c2
+        valid = np.outer(mask1, mask2) & (pae < pae_cutoff)
+        d0_byres = _d0_array(valid.sum(axis=1))
+        best = 0.0
+        for i in np.where(mask1)[0]:
+            row_valid = valid[i]
+            if not row_valid.any():
+                continue
+            best = max(best, float(_ptm_score(pae[i, row_valid], d0_byres[i]).mean()))
+        return best
+
+    scores = {}
+    for pos, c1 in enumerate(unique_chains):
+        for c2 in unique_chains[pos + 1:]:
+            scores[(c1, c2)] = max(_directional(c1, c2), _directional(c2, c1))
+    return scores
+
+
 def build_confidence_figure(model_index, summary, full_data, rank=None):
     """Build a per-model figure with the PAE heatmap and, when more than two chains
     are present, the pairwise ipTM matrix alongside it."""

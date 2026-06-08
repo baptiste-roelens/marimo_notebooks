@@ -12,7 +12,12 @@ def _():
 
 @app.cell(hide_code=True)
 def _():
-    from widget.af3_helpers import group_af3_files, parse_af3_json, build_confidence_figure
+    from widget.af3_helpers import (
+        group_af3_files,
+        parse_af3_json,
+        build_confidence_figure,
+        compute_ipsae,
+    )
     from widget.structure_helpers import (
         BASIC_COLORS,
         default_color,
@@ -27,6 +32,7 @@ def _():
         atoms_to_pdb_str,
         build_confidence_figure,
         build_structure_html,
+        compute_ipsae,
         default_color,
         get_b_range,
         group_af3_files,
@@ -202,6 +208,65 @@ def _(af3_models, build_confidence_figure, mo):
         )
 
     mo.vstack([mo.md(_intro), *_figs])
+    return
+
+
+@app.cell(hide_code=True)
+def _(af3_models, mo):
+    _has_full_data = any(_m["full_data"] is not None for _m in af3_models)
+    mo.stop(
+        not _has_full_data,
+        mo.callout(mo.md("Upload the `..._full_data_N.json` files to compute ipSAE."), kind="info"),
+    )
+
+    ipsae_cutoff = mo.ui.slider(
+        5, 30, value=10, step=1, label="PAE cutoff for ipSAE (Å)", show_value=True
+    )
+
+    mo.vstack([
+        mo.md(r"""
+        ### ipSAE — interface confidence between chains
+
+        **ipSAE** ([Dunbrack et al.](https://www.biorxiv.org/content/10.1101/2025.02.10.637595))
+        is an alternative to ipTM for scoring inter-chain interfaces. It only counts
+        residue pairs whose predicted aligned error is below the cutoff below, and
+        normalises each residue's contribution by how many partner-chain residues are
+        confidently placed near it. This makes it markedly more sensitive than ipTM to
+        confidently docked sub-interfaces within larger or partly flexible assemblies —
+        where a single weak/disordered chain can otherwise drag the global ipTM down.
+
+        Like ipTM, scores above ~0.5 generally indicate a confidently predicted interface.
+        """),
+        ipsae_cutoff,
+    ])
+    return (ipsae_cutoff,)
+
+
+@app.cell(hide_code=True)
+def _(af3_models, compute_ipsae, ipsae_cutoff, mo):
+    import pandas as _pd
+
+    _rows = []
+    for _m in af3_models:
+        if _m["full_data"] is None:
+            continue
+        _scores = compute_ipsae(
+            _m["full_data"]["pae"],
+            _m["full_data"]["token_chain_ids"],
+            pae_cutoff=float(ipsae_cutoff.value),
+        )
+        for (_c1, _c2), _score in _scores.items():
+            _rows.append({
+                "Model": f"Model {_m['index']} (rank {_m['rank']})",
+                "Chain 1": _c1,
+                "Chain 2": _c2,
+                "ipSAE": round(_score, 3),
+            })
+
+    mo.stop(not _rows, mo.callout(mo.md("No chain pairs to score."), kind="info"))
+
+    _df = _pd.DataFrame(_rows)
+    mo.ui.table(_df, selection=None)
     return
 
 
