@@ -7,7 +7,11 @@
 #     "matplotlib==3.10.5",
 #     "numpy==2.4.1",
 #     "pandas",
+#     "marimo-bio-widget-helpers",
 # ]
+#
+# [tool.uv.sources]
+# marimo-bio-widget-helpers = { git = "https://github.com/baptiste-roelens/marimo_notebooks", subdirectory = "widget" }
 # ///
 
 import marimo
@@ -27,12 +31,6 @@ def _imports():
     from pathlib import Path
 
     import marimo as mo
-
-    # Make the local Protenix package (and this repo's `widget` helpers) importable
-    # even without `pip install`
-    _repo_root = str(Path(__file__).parent.parent)
-    if _repo_root not in sys.path:
-        sys.path.insert(0, _repo_root)
 
     # Reuse the same confidence-figure / ipSAE / structure-viewer building blocks as
     # the AlphaFold3 prediction viewer widget — Protenix's outputs are normalized to
