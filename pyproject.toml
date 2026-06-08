@@ -12,6 +12,7 @@ dependencies = [
     "pymsaviz>=0.5",
     "biotite>=0.39",
     "py3dmol>=2.0",
+    "tmtools>=0.2",
 ]
 
 [tool.marimo.runtime]

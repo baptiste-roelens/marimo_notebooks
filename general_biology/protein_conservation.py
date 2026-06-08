@@ -9,6 +9,7 @@
 #     "pymsaviz>=0.5",
 #     "biotite>=0.39",
 #     "py3dmol>=2.0",
+#     "tmtools>=0.2",
 #     "marimo-bio-widget-helpers",
 # ]
 #
@@ -47,8 +48,7 @@ def _():
         default_color,
         parse_pdb_str,
         atoms_to_pdb_str,
-        superimpose_all,
-        compute_tm_score,
+        tm_align_all,
         get_b_range,
         build_structure_html,
     )
@@ -194,7 +194,6 @@ def _():
         atoms_to_pdb_str,
         build_msaviz_figure,
         build_structure_html,
-        compute_tm_score,
         default_color,
         fetch_pdb,
         get_b_range,
@@ -203,7 +202,7 @@ def _():
         parse_pdb_str,
         run_clustalo,
         search_uniprot,
-        superimpose_all,
+        tm_align_all,
     )
 
 
@@ -489,9 +488,14 @@ def _(mo):
     ### Step 4 — Structural conservation
 
     Sequences diverge far faster than folds. Below, **AlphaFold Database (AFDB)** predicted
-    structures are fetched for the selected orthologs and superimposed onto the first entry
-    (reference) using **Cα atoms only**. The table reports two complementary similarity
-    measures:
+    structures are fetched for the selected orthologs and aligned onto the first entry
+    (reference) using **TM-align** (Zhang & Skolnick, 2005). Unlike a naive superposition —
+    which assumes residue *i* in one structure corresponds to residue *i* in the other, an
+    assumption that breaks down for orthologs with insertions, deletions or different lengths
+    — TM-align searches for the residue correspondence *and* rigid-body transformation that
+    jointly **maximise structural similarity**, giving a meaningful alignment regardless of
+    sequence differences. The table reports two complementary similarity measures computed
+    over this optimal alignment:
 
     - **RMSD** (root-mean-square deviation of Cα positions after superimposition) is the
       classic, intuitive measure — but it is dominated by the worst-aligned residues (e.g. a
@@ -527,14 +531,13 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     atoms_to_pdb_str,
-    compute_tm_score,
     fetch_pdb,
     get_b_range,
     mo,
     ortholog_table,
     orthologs_df,
     parse_pdb_str,
-    superimpose_all,
+    tm_align_all,
 ):
     import pandas as _pd
 
@@ -572,15 +575,11 @@ def _(
         mo.callout(mo.md("Could not download any PDB files from AFDB."), kind="danger"),
     )
 
-    with mo.status.spinner("Superimposing structures on Cα atoms…"):
+    with mo.status.spinner("Aligning structures with TM-align…"):
         _atoms_list    = [parse_pdb_str(p) for p in _pdbs_raw]
-        _aligned_atoms, _rmsds = superimpose_all(_atoms_list)
+        _aligned_atoms, _rmsds, _tm_scores = tm_align_all(_atoms_list)
         struct_pdbs    = [atoms_to_pdb_str(a) for a in _aligned_atoms]
         b_ranges       = [get_b_range(a) for a in _aligned_atoms]
-        _tm_scores     = [
-            compute_tm_score(_aligned_atoms[0], _mobile)
-            for _mobile in _aligned_atoms[1:]
-        ]
 
     _rmsd_df = _pd.DataFrame({
         "Gene | Organism":  struct_labels,

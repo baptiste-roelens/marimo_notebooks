@@ -2,6 +2,7 @@ import html as _html
 from io import StringIO
 
 import numpy as np
+from tmtools import tm_align
 import biotite.structure as struc
 import biotite.structure.io.pdb as bpdb
 from biotite.structure.io.pdbx import CIFFile, get_structure as _get_structure_cif
@@ -86,30 +87,57 @@ def superimpose_all(structures: list) -> tuple[list, list[float]]:
     return out, rmsds
 
 
-def compute_tm_score(ref_atoms, mobile_atoms) -> float:
-    """TM-score between two already-superimposed structures' Cα traces.
+def _ca_sequence(ca_atoms) -> str:
+    return "".join(struc.info.one_letter_code(name) or "X" for name in ca_atoms.res_name)
 
-    Unlike RMSD, TM-score (Zhang & Skolnick, Proteins 2004) is normalised by the
-    reference structure's length and saturates with distance, so it stays
-    comparable across proteins of different sizes and is far less sensitive to
-    a handful of poorly-aligned (e.g. flexible/disordered) residues — making it
-    a more robust measure of overall fold similarity than RMSD:
 
-        TM = (1 / L_ref) * Σ 1 / (1 + (d_i / d0)²)
+def tm_align_all(structures: list) -> tuple[list, list[float], list[float]]:
+    """Align all structures onto the first using TM-align (Zhang & Skolnick, 2005).
 
-    where d0 grows with chain length (floored at 0.5 Å). Scores range 0–1;
-    > 0.5 generally indicates the same fold.
+    `superimpose_all` assumes residue *i* in one structure corresponds to residue
+    *i* in the other — a fine assumption when comparing predictions of the *same*
+    sequence (e.g. AlphaFold models), but wrong for orthologs, which can differ in
+    length and have insertions/deletions. Forcing a naive positional correspondence
+    there produces a poor superposition (inflated RMSD) and an artificially low
+    TM-score. TM-align instead searches for the residue correspondence *and*
+    rigid-body transformation that jointly maximise the TM-score, giving a
+    structurally meaningful alignment regardless of sequence differences.
+
+    Returns `(aligned_structures, rmsds, tm_scores)`. RMSD and TM-score are
+    computed by TM-align over the residues it aligned (not a naive truncation);
+    TM-score is normalised by the reference structure's length.
     """
-    ca_ref = ref_atoms[(ref_atoms.atom_name == "CA") & ~ref_atoms.hetero]
-    ca_mob = mobile_atoms[(mobile_atoms.atom_name == "CA") & ~mobile_atoms.hetero]
-    n = min(len(ca_ref), len(ca_mob))
-    if n == 0:
-        return float("nan")
+    ref = structures[0]
+    ca_ref = ref[(ref.atom_name == "CA") & ~ref.hetero]
+    seq_ref = _ca_sequence(ca_ref)
 
-    d = np.sqrt(((ca_ref.coord[:n] - ca_mob.coord[:n]) ** 2).sum(axis=1))
-    l_ref = len(ca_ref)
-    d0 = max(0.5, 1.24 * (l_ref - 15.0) ** (1.0 / 3.0) - 1.8) if l_ref > 15 else 0.5
-    return float(np.mean(1.0 / (1.0 + (d / d0) ** 2)))
+    out = [ref]
+    rmsds: list[float] = []
+    tm_scores: list[float] = []
+
+    for mobile in structures[1:]:
+        ca_mob = mobile[(mobile.atom_name == "CA") & ~mobile.hetero]
+        seq_mob = _ca_sequence(ca_mob)
+        try:
+            result = tm_align(
+                ca_ref.coord.astype(np.float64),
+                ca_mob.coord.astype(np.float64),
+                seq_ref,
+                seq_mob,
+            )
+            mobile_t = mobile.copy()
+            mobile_t.coord = mobile.coord @ np.asarray(result.u).T + np.asarray(result.t)
+            rmsd = float(result.rmsd)
+            tm_score = float(result.tm_norm_chain1)
+        except Exception:
+            mobile_t = mobile
+            rmsd = float("nan")
+            tm_score = float("nan")
+        out.append(mobile_t)
+        rmsds.append(rmsd)
+        tm_scores.append(tm_score)
+
+    return out, rmsds, tm_scores
 
 
 def get_b_range(atoms) -> tuple[float, float]:
