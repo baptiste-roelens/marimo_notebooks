@@ -7,11 +7,7 @@
 #     "matplotlib==3.10.5",
 #     "numpy==2.4.1",
 #     "pandas",
-#     "marimo-bio-widget-helpers",
 # ]
-#
-# [tool.uv.sources]
-# marimo-bio-widget-helpers = { git = "https://github.com/baptiste-roelens/marimo_notebooks", subdirectory = "widget" }
 # ///
 
 import marimo
@@ -32,45 +28,323 @@ def _imports():
 
     import marimo as mo
 
-    # Reuse the same confidence-figure / ipSAE / structure-viewer building blocks as
-    # the AlphaFold3 prediction viewer widget — Protenix's outputs are normalized to
-    # the same schema (see `normalize_summary` / `normalize_full_data`) so the exact
-    # same visualizations apply to both.
-    from widget.af3_helpers import (
-        normalize_summary,
-        normalize_full_data,
-        build_confidence_figure,
-        compute_ipsae,
-    )
-    from widget.structure_helpers import (
-        BASIC_COLORS,
-        default_color,
-        parse_structure,
-        atoms_to_pdb_str,
-        superimpose_all,
-        get_b_range,
-        build_structure_html,
-    )
+    return Path, glob, json, mo, os, shutil, subprocess, sys
+
+
+@app.cell(hide_code=True)
+def _viz_helpers():
+    """Confidence-figure / ipSAE / structure-viewer building blocks.
+
+    Inlined here — rather than imported from `widget.af3_helpers` /
+    `widget.structure_helpers` — so this notebook stays a single self-contained
+    file that runs in sandboxed environments (e.g. MoLab) where the local
+    `widget` package can't be resolved. They are otherwise identical to the
+    AlphaFold3 prediction viewer widget's, so once Protenix's confidence JSON is
+    normalized onto AlphaFold3's schema (`normalize_summary` /
+    `normalize_full_data`), the exact same visualizations apply to both.
+    """
+    import html as _html
+    from io import StringIO
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import biotite.structure as struc
+    import biotite.structure.io.pdb as bpdb
+    from biotite.structure.io.pdbx import CIFFile, get_structure as _get_structure_cif
+
+    # ── Confidence-schema normalization & scoring ───────────────────────────────
+
+    def _chain_letter(asym_id) -> str:
+        """Render a 0-based numeric chain index the way AlphaFold3 labels chains (A, B, … Z, AA, …)."""
+        n = int(asym_id)
+        letters = ""
+        while True:
+            n, rem = divmod(n, 26)
+            letters = chr(ord("A") + rem) + letters
+            if n == 0:
+                return letters
+            n -= 1
+
+    def normalize_summary(raw, source):
+        """Map Protenix's `disorder` onto AlphaFold3's `fraction_disordered` — the
+        only summary-confidence key the two tools name differently."""
+        summary = dict(raw)
+        if source == "protenix" and "fraction_disordered" not in summary and "disorder" in summary:
+            summary["fraction_disordered"] = summary["disorder"]
+        return summary
+
+    def normalize_full_data(raw, source):
+        """Alias Protenix's `token_pair_pae` / `token_asym_id` / `atom_plddt` onto
+        AlphaFold3's `pae` / `token_chain_ids` / `atom_plddts` so the figure and
+        ipSAE helpers below work unchanged for either source."""
+        full_data = dict(raw)
+        if source == "protenix":
+            if "pae" not in full_data and "token_pair_pae" in full_data:
+                full_data["pae"] = full_data["token_pair_pae"]
+            if "token_chain_ids" not in full_data and "token_asym_id" in full_data:
+                full_data["token_chain_ids"] = [_chain_letter(a) for a in full_data["token_asym_id"]]
+            if "atom_plddts" not in full_data and "atom_plddt" in full_data:
+                full_data["atom_plddts"] = full_data["atom_plddt"]
+        return full_data
+
+    def chain_boundaries(chain_ids):
+        bounds = []
+        start = 0
+        current = chain_ids[0]
+        for i in range(1, len(chain_ids)):
+            if chain_ids[i] != current:
+                bounds.append((current, start, i))
+                start = i
+                current = chain_ids[i]
+        bounds.append((current, start, len(chain_ids)))
+        return bounds
+
+    def _ptm_score(pae, d0):
+        return 1.0 / (1.0 + (pae / d0) ** 2.0)
+
+    def _d0_array(n_residues):
+        n_residues = np.maximum(26.0, np.asarray(n_residues, dtype=float))
+        return np.maximum(1.0, 1.24 * (n_residues - 15.0) ** (1.0 / 3.0) - 1.8)
+
+    def compute_ipsae(pae, chain_ids, pae_cutoff=10.0):
+        pae = np.asarray(pae, dtype=float)
+        chains = np.asarray(chain_ids)
+        unique_chains = sorted(set(chain_ids))
+
+        def _directional(c1, c2):
+            mask1 = chains == c1
+            mask2 = chains == c2
+            valid = np.outer(mask1, mask2) & (pae < pae_cutoff)
+            d0_byres = _d0_array(valid.sum(axis=1))
+            best = 0.0
+            for i in np.where(mask1)[0]:
+                row_valid = valid[i]
+                if not row_valid.any():
+                    continue
+                best = max(best, float(_ptm_score(pae[i, row_valid], d0_byres[i]).mean()))
+            return best
+
+        scores = {}
+        for pos, c1 in enumerate(unique_chains):
+            for c2 in unique_chains[pos + 1:]:
+                scores[(c1, c2)] = max(_directional(c1, c2), _directional(c2, c1))
+        return scores
+
+    def build_confidence_figure(model_index, summary, full_data, rank=None):
+        pae = np.asarray(full_data["pae"], dtype=float)
+        chain_ids = full_data["token_chain_ids"]
+        bounds = chain_boundaries(chain_ids)
+        ticks = [(s + e) / 2 - 0.5 for _, s, e in bounds]
+        labels = [c for c, _, _ in bounds]
+
+        chain_pair_iptm = summary.get("chain_pair_iptm")
+        show_matrix = chain_pair_iptm is not None and len(chain_pair_iptm) > 2
+
+        if show_matrix:
+            fig, (ax_pae, ax_iptm) = plt.subplots(1, 2, figsize=(9, 4))
+        else:
+            fig, ax_pae = plt.subplots(1, 1, figsize=(4.6, 4))
+
+        im = ax_pae.imshow(pae, cmap="Greens_r", vmin=0, vmax=31.75)
+        for _, _start, end in bounds[:-1]:
+            ax_pae.axhline(end - 0.5, color="white", linewidth=0.7)
+            ax_pae.axvline(end - 0.5, color="white", linewidth=0.7)
+        ax_pae.set_xticks(ticks)
+        ax_pae.set_xticklabels(labels, fontsize=8)
+        ax_pae.set_yticks(ticks)
+        ax_pae.set_yticklabels(labels, fontsize=8)
+        ax_pae.set_title("Predicted aligned error (Å)", fontsize=9)
+        fig.colorbar(im, ax=ax_pae, fraction=0.046, pad=0.04)
+
+        if show_matrix:
+            mat = np.asarray(chain_pair_iptm, dtype=float)
+            im2 = ax_iptm.imshow(mat, cmap="Blues", vmin=0, vmax=1)
+            for i in range(mat.shape[0]):
+                for j in range(mat.shape[1]):
+                    ax_iptm.text(
+                        j, i, f"{mat[i, j]:.2f}",
+                        ha="center", va="center", fontsize=8,
+                        color="white" if mat[i, j] > 0.5 else "black",
+                    )
+            ax_iptm.set_xticks(range(len(labels)))
+            ax_iptm.set_xticklabels(labels, fontsize=8)
+            ax_iptm.set_yticks(range(len(labels)))
+            ax_iptm.set_yticklabels(labels, fontsize=8)
+            ax_iptm.set_title("Pairwise ipTM", fontsize=9)
+            fig.colorbar(im2, ax=ax_iptm, fraction=0.046, pad=0.04)
+
+        _rank = f"rank {rank} · " if rank is not None else ""
+        _ptm = summary.get("ptm")
+        _iptm = summary.get("iptm")
+        _metrics = f"pTM={_ptm:.2f}" if _ptm is not None else ""
+        if _iptm is not None:
+            _metrics += f", ipTM={_iptm:.2f}"
+        fig.suptitle(f"Model {model_index} — {_rank}{_metrics}", fontsize=10)
+        fig.tight_layout(rect=[0, 0, 1, 0.92])
+        return fig
+
+    # ── Structure parsing & 3D viewer ───────────────────────────────────────────
+
+    BASIC_COLORS = {
+        "Blue":   "#4e9af1",
+        "Orange": "#f1a94e",
+        "Red":    "#e45c3a",
+        "Green":  "#4eba6f",
+        "Purple": "#9b59b6",
+        "Teal":   "#1abc9c",
+        "Pink":   "#e91e8c",
+        "Yellow": "#f1c40f",
+        "Gray":   "#95a5a6",
+        "Cyan":   "#00bcd4",
+    }
+    _color_cycle = list(BASIC_COLORS.keys())
+
+    def default_color(index):
+        return _color_cycle[index % len(_color_cycle)]
+
+    def _is_cif(filename):
+        return filename.rsplit(".", 1)[-1].lower() in ("cif", "mmcif")
+
+    def parse_structure(contents, filename):
+        text = contents.decode("utf-8", errors="replace")
+        if _is_cif(filename):
+            cf = CIFFile.read(StringIO(text))
+            atoms = _get_structure_cif(cf, model=1, extra_fields=["b_factor"])
+        else:
+            pf = bpdb.PDBFile.read(StringIO(text))
+            atoms = bpdb.get_structure(pf, model=1, extra_fields=["b_factor"])
+        if isinstance(atoms, struc.AtomArrayStack):
+            atoms = atoms[0]
+        return atoms
+
+    def atoms_to_pdb_str(atoms):
+        pf = bpdb.PDBFile()
+        bpdb.set_structure(pf, atoms)
+        buf = StringIO()
+        pf.write(buf)
+        return buf.getvalue()
+
+    def superimpose_all(structures):
+        ref = structures[0]
+        ca_ref = ref[(ref.atom_name == "CA") & ~ref.hetero]
+
+        out = [ref]
+        rmsds = []
+
+        for mobile in structures[1:]:
+            ca_mob = mobile[(mobile.atom_name == "CA") & ~mobile.hetero]
+            n = min(len(ca_ref), len(ca_mob))
+            try:
+                _, tf = struc.superimpose(ca_ref[:n], ca_mob[:n])
+                mobile_t = tf.apply(mobile)
+                ca_mob_t = mobile_t[(mobile_t.atom_name == "CA") & ~mobile_t.hetero]
+                rmsd = float(struc.rmsd(ca_ref[:n], ca_mob_t[:n]))
+            except Exception:
+                mobile_t = mobile
+                rmsd = float("nan")
+            out.append(mobile_t)
+            rmsds.append(rmsd)
+
+        return out, rmsds
+
+    def get_b_range(atoms):
+        cats = atoms.get_annotation_categories()
+        if "b_factor" not in cats:
+            return (0.0, 100.0)
+        ca_mask = (atoms.atom_name == "CA") & ~atoms.hetero
+        b = atoms.b_factor[ca_mask]
+        if len(b) == 0:
+            return (0.0, 100.0)
+        return (float(b.min()), float(b.max()))
+
+    def _js_esc(s):
+        return s.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+
+    def build_structure_html(pdb_contents, labels, visibilities, color_modes, colors, b_ranges, height=600):
+        add_models_js = []
+        for i, (pdb, visible, mode, color, (bmin, bmax)) in enumerate(
+            zip(pdb_contents, visibilities, color_modes, colors, b_ranges)
+        ):
+            add_models_js.append(f"viewer.addModel(`{_js_esc(pdb)}`, 'pdb');")
+            if not visible:
+                add_models_js.append(f"  viewer.setStyle({{model:{i}}}, {{}});")
+            elif mode == "B-factor":
+                add_models_js.append(
+                    "  viewer.setStyle({model:%d}, {cartoon:{colorscheme:{prop:'b',gradient:'roygb',min:%.2f,max:%.2f}}});"
+                    % (i, bmin, bmax)
+                )
+            else:
+                add_models_js.append(
+                    f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{color:'{color}'}}}});"
+                )
+
+        models_js = "\n  ".join(add_models_js)
+
+        legend_parts = []
+        for label, visible, mode, color in zip(labels, visibilities, color_modes, colors):
+            if not visible:
+                continue
+            if mode == "B-factor":
+                swatch = (
+                    '<span style="background:linear-gradient(to right,'
+                    '#FF0000,#FFFF00,#00FF00,#0000FF);'
+                    'width:28px;height:12px;display:inline-block;'
+                    'border-radius:2px;margin-right:4px;vertical-align:middle;"></span>'
+                )
+            else:
+                swatch = (
+                    f'<span style="background:{_html.escape(color)};'
+                    'width:12px;height:12px;border-radius:2px;'
+                    'display:inline-block;margin-right:4px;vertical-align:middle;"></span>'
+                )
+            legend_parts.append(
+                f'<span style="display:inline-flex;align-items:center;margin-right:12px;">'
+                f'{swatch}<span style="font-size:11px;">{_html.escape(label)}</span></span>'
+            )
+
+        legend_html = (
+            " ".join(legend_parts) if legend_parts else "<em style='color:#999'>No structures visible</em>"
+        )
+
+        inner = f"""<!DOCTYPE html>
+<html><head>
+<script src='https://3Dmol.csb.pitt.edu/build/3Dmol-min.js'></script>
+<style>
+  body{{margin:0;padding:0;background:#f8f8f8;font-family:sans-serif;}}
+  #legend{{padding:5px 8px;font-size:11px;border-bottom:1px solid #e0e0e0;min-height:26px;}}
+  #v{{position:absolute;top:30px;left:0;right:0;bottom:0;}}
+</style>
+</head><body>
+<div id='legend'>{legend_html}</div>
+<div id='v'></div>
+<script>
+window.addEventListener('load', function() {{
+  var viewer = $3Dmol.createViewer(document.getElementById('v'), {{backgroundColor:'#f8f8f8'}});
+  {models_js}
+  viewer.zoomTo();
+  viewer.render();
+}});
+</script>
+</body></html>"""
+
+        return (
+            f'<iframe srcdoc="{_html.escape(inner, quote=True)}" '
+            f'style="width:100%;height:{height}px;border:1px solid #ddd;'
+            f'border-radius:4px;" frameborder="0"></iframe>'
+        )
+
     return (
         BASIC_COLORS,
-        Path,
         atoms_to_pdb_str,
         build_confidence_figure,
         build_structure_html,
         compute_ipsae,
         default_color,
         get_b_range,
-        glob,
-        json,
-        mo,
         normalize_full_data,
         normalize_summary,
-        os,
         parse_structure,
-        shutil,
-        subprocess,
         superimpose_all,
-        sys,
     )
 
 
