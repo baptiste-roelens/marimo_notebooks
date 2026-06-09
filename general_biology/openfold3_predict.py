@@ -796,13 +796,19 @@ def _run_inference(
         )
 
     # ── Detect CUDA_HOME (deepspeed checks it at import time) ─────────────────
-    _nvcc = shutil.which("nvcc")
-    _cuda_home = None
-    if _nvcc:
-        _cuda_home = str(Path(_nvcc).resolve().parent.parent)
-    else:
-        for _cand in sorted(glob.glob("/usr/local/cuda*"), reverse=True):
-            if os.path.isfile(os.path.join(_cand, "bin", "nvcc")):
+    # Checking for cuda.h is intentional: runtime-only installs have headers
+    # but not nvcc, so we must not require the compiler binary.
+    _cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not _cuda_home:
+        _nvcc = shutil.which("nvcc")
+        if _nvcc:
+            _cuda_home = str(Path(_nvcc).resolve().parent.parent)
+    if not _cuda_home:
+        for _cand in ["/usr/local/cuda"] + sorted(glob.glob("/usr/local/cuda-*"), reverse=True) + ["/usr"]:
+            if os.path.isdir(_cand) and (
+                os.path.isfile(os.path.join(_cand, "bin", "nvcc"))
+                or os.path.isfile(os.path.join(_cand, "include", "cuda.h"))
+            ):
                 _cuda_home = _cand
                 break
     _env = {**os.environ}
