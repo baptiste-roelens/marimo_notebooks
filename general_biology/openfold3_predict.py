@@ -716,7 +716,7 @@ def _build_inputs(
         label="Input query JSON preview (MSA paths are injected at run time)",
     )
     mo.vstack([mo.md("## JSON preview"), json_preview_ui])
-    return input_data, _job_name
+    return (input_data,)
 
 
 @app.cell(hide_code=True)
@@ -754,7 +754,6 @@ def _run_section(mo):
 @app.cell(hide_code=True)
 def _run_inference(
     Path,
-    _job_name,
     glob,
     input_data,
     json,
@@ -777,6 +776,8 @@ def _run_inference(
     import yaml as _yaml
 
     mo.stop(not run_btn.value, mo.md("*Click **▶ Run Prediction** to start.*"))
+
+    _job_name = list(input_data["queries"].keys())[0]
 
     # ── Locate executable ───────────────────────────────────────────────────────
     _exe = shutil.which(openfold_cmd_ui.value)
