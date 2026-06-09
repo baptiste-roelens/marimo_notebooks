@@ -181,6 +181,10 @@ def build_structure_html(
                 "  viewer.setStyle({model:%d}, {cartoon:{colorscheme:{prop:'b',gradient:'roygb',min:%.2f,max:%.2f}}});"
                 % (i, bmin, bmax)
             )
+        elif mode == "By chain":
+            add_models_js.append(
+                f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{colorscheme:'chainHetatm'}}}});"
+            )
         else:
             add_models_js.append(
                 f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{color:'{color}'}}}});"
@@ -196,6 +200,13 @@ def build_structure_html(
             swatch = (
                 '<span style="background:linear-gradient(to right,'
                 '#FF0000,#FFFF00,#00FF00,#0000FF);'
+                'width:28px;height:12px;display:inline-block;'
+                'border-radius:2px;margin-right:4px;vertical-align:middle;"></span>'
+            )
+        elif mode == "By chain":
+            swatch = (
+                '<span style="background:linear-gradient(to right,'
+                '#1f77b4,#ff7f0e,#2ca02c,#d62728,#9467bd,#8c564b,#e377c2);'
                 'width:28px;height:12px;display:inline-block;'
                 'border-radius:2px;margin-right:4px;vertical-align:middle;"></span>'
             )

@@ -273,6 +273,10 @@ def _viz_helpers():
                     "  viewer.setStyle({model:%d}, {cartoon:{colorscheme:{prop:'b',gradient:'roygb',min:%.2f,max:%.2f}}});"
                     % (i, bmin, bmax)
                 )
+            elif mode == "By chain":
+                add_models_js.append(
+                    f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{colorscheme:'chainHetatm'}}}});"
+                )
             else:
                 add_models_js.append(
                     f"  viewer.setStyle({{model:{i}}}, {{cartoon:{{color:'{color}'}}}});"
@@ -288,6 +292,13 @@ def _viz_helpers():
                 swatch = (
                     '<span style="background:linear-gradient(to right,'
                     '#FF0000,#FFFF00,#00FF00,#0000FF);'
+                    'width:28px;height:12px;display:inline-block;'
+                    'border-radius:2px;margin-right:4px;vertical-align:middle;"></span>'
+                )
+            elif mode == "By chain":
+                swatch = (
+                    '<span style="background:linear-gradient(to right,'
+                    '#1f77b4,#ff7f0e,#2ca02c,#d62728,#9467bd,#8c564b,#e377c2);'
                     'width:28px;height:12px;display:inline-block;'
                     'border-radius:2px;margin-right:4px;vertical-align:middle;"></span>'
                 )
@@ -401,7 +412,7 @@ def _settings_ui(Path, mo):
 
 
 @app.cell(hide_code=True)
-def _model_ui(mo):
+def _model_ui(mo, use_constraints_ui):
     _MODELS = [
         "protenix-v2",
         "protenix_base_default_v1.0.0",
@@ -430,8 +441,28 @@ def _model_ui(mo):
         value=f"{_DEFAULT_MODEL}  ({_DESC[_DEFAULT_MODEL]})",
         label="Model",
     )
-    mo.vstack([mo.md("## Model"), model_ui])
+    mo.vstack([
+        mo.md("## Model"),
+        model_ui,
+        *(
+            [mo.callout(
+                mo.md("Constraints enabled — model forced to `protenix_base_constraint_v0.5.0`."),
+                kind="info",
+            )]
+            if use_constraints_ui.value else []
+        ),
+    ])
     return (model_ui,)
+
+
+@app.cell(hide_code=True)
+def _effective_model(model_ui, use_constraints_ui):
+    effective_model = (
+        "protenix_base_constraint_v0.5.0"
+        if use_constraints_ui.value
+        else model_ui.value
+    )
+    return (effective_model,)
 
 
 @app.cell(hide_code=True)
@@ -616,7 +647,90 @@ def _params_widgets(mo):
 
 
 @app.cell(hide_code=True)
+def _constraints_ui(mo):
+    use_constraints_ui = mo.ui.switch(value=False, label="Use structural constraints")
+    constraint_text_ui = mo.ui.text_area(
+        value="",
+        placeholder=(
+            '{\n  "contact": [\n    {\n'
+            '      "entity1": 1, "copy1": 1, "position1": 10,\n'
+            '      "entity2": 2, "copy2": 1, "position2": 20,\n'
+            '      "max_distance": 8.0\n    }\n  ]\n}'
+        ),
+        label="Constraint JSON",
+        rows=8,
+        full_width=True,
+    )
+    mo.vstack([mo.md("## Constraints"), use_constraints_ui])
+    return constraint_text_ui, use_constraints_ui
+
+
+@app.cell(hide_code=True)
+def _constraints_detail(constraint_text_ui, mo, use_constraints_ui):
+    mo.stop(not use_constraints_ui.value)
+    mo.vstack([
+        mo.callout(
+            mo.md(
+                "Only `protenix_base_constraint_v0.5.0` supports constraints — "
+                "the model will be forced to this checkpoint regardless of the "
+                "model selected above."
+            ),
+            kind="warn",
+        ),
+        mo.md(r"""
+**Protenix uses 1-based `entity` / `copy` / `position` indices** — not chain letters.
+`entity` is the 1-based position of the chain in your *sequences* list; `copy` selects a
+specific instance when an entity has `count > 1`; `position` is the 1-based residue index
+within that chain. This differs from AlphaFold3-style `chain`/`residue` notation.
+
+#### Contact — residue level
+Forces two residues to be within `max_distance` Å of each other:
+```json
+{
+  "contact": [
+    {
+      "entity1": 1, "copy1": 1, "position1": 10,
+      "entity2": 2, "copy2": 1, "position2": 20,
+      "max_distance": 8.0,
+      "min_distance": 0.0
+    }
+  ]
+}
+```
+
+#### Contact — atom level
+Add `"atom1"` and `"atom2"` (atom name strings, e.g. `"CA"`, `"CB"`) to constrain specific atoms:
+```json
+{"contact": [{"entity1":1,"copy1":1,"position1":10,"atom1":"CA",
+              "entity2":2,"copy2":1,"position2":20,"atom2":"CB",
+              "max_distance":6.0}]}
+```
+
+#### Pocket — binding site
+Specifies that the binder chain should dock within `max_distance` Å of the listed receptor residues:
+```json
+{
+  "pocket": {
+    "binder_chain": {"entity": 1, "copy": 1},
+    "max_distance": 8.0,
+    "contact_residues": [
+      {"entity": 2, "copy": 1, "position": 10},
+      {"entity": 2, "copy": 1, "position": 11}
+    ]
+  }
+}
+```
+
+Multiple constraint types can be combined in the same object: `{"contact": [...], "pocket": {...}}`.
+        """),
+        constraint_text_ui,
+    ])
+    return
+
+
+@app.cell(hide_code=True)
 def _build_json(
+    constraint_text_ui,
     dna_forms_ui,
     ion_forms_ui,
     job_name_ui,
@@ -625,6 +739,7 @@ def _build_json(
     mo,
     protein_forms_ui,
     rna_forms_ui,
+    use_constraints_ui,
 ):
     _sequences = []
     for _f in protein_forms_ui.value:
@@ -648,11 +763,20 @@ def _build_json(
         if _ion:
             _sequences.append({"ion": {"ion": _ion, "count": int(_f["count"])}})
 
+    _constraint = {}
+    _constraint_error = ""
+    if use_constraints_ui.value and constraint_text_ui.value.strip():
+        try:
+            _constraint = json.loads(constraint_text_ui.value)
+        except Exception as _e:
+            _constraint_error = f"Invalid constraint JSON: {_e}"
+
     input_data = [
         {
             "name": job_name_ui.value.strip() or "prediction",
             "sequences": _sequences,
             "covalent_bonds": [],
+            **({"constraint": _constraint} if _constraint else {}),
         }
     ]
 
@@ -662,7 +786,14 @@ def _build_json(
         language="json",
         label="Input JSON preview (edit fields above to update)",
     )
-    mo.vstack([mo.md("## JSON preview"), json_preview_ui])
+    mo.vstack([
+        mo.md("## JSON preview"),
+        *(
+            [mo.callout(mo.md(_constraint_error), kind="danger")]
+            if _constraint_error else []
+        ),
+        json_preview_ui,
+    ])
     return (input_data,)
 
 
@@ -688,6 +819,7 @@ def _run_inference(
     Path,
     atom_conf_ui,
     dtype_ui,
+    effective_model,
     glob,
     input_data,
     json,
@@ -773,7 +905,7 @@ def _run_inference(
     _cmd += [
         "-i", _json_path,
         "-o", pred_out_root,
-        "-n", model_ui.value,
+        "-n", effective_model,
         "-s", seeds_ui.value,
         "-c", str(int(n_cycle_ui.value)),
         "-p", str(int(n_step_ui.value)),
@@ -1011,11 +1143,14 @@ def _ipsae_table(compute_ipsae, ipsae_cutoff, mo, prediction_models):
                 "ipSAE": round(_score, 3),
             })
 
-    mo.stop(not _rows, mo.callout(mo.md("No chain pairs to score."), kind="info"))
+    ipsae_df = _pd.DataFrame(_rows)
 
-    _df = _pd.DataFrame(_rows)
-    mo.ui.table(_df, selection=None)
-    return
+    (
+        mo.ui.table(ipsae_df, selection=None)
+        if _rows
+        else mo.callout(mo.md("No chain pairs to score."), kind="info")
+    )
+    return (ipsae_df,)
 
 
 @app.cell(hide_code=True)
@@ -1066,7 +1201,7 @@ def _structure_controls(mo, structure_labels, BASIC_COLORS, default_color):
         label="Visibility",
     )
     global_color_mode = mo.ui.dropdown(
-        ["Individual", "Solid color", "B-factor"],
+        ["Individual", "Solid color", "B-factor", "By chain"],
         value="Individual",
         label="Color mode",
     )
@@ -1081,7 +1216,7 @@ def _structure_controls(mo, structure_labels, BASIC_COLORS, default_color):
         [mo.ui.checkbox(True) for _ in range(_n)]
     )
     color_mode_controls = mo.ui.array(
-        [mo.ui.dropdown(["Solid color", "B-factor"], value="Solid color") for _ in range(_n)]
+        [mo.ui.dropdown(["Solid color", "B-factor", "By chain"], value="Solid color") for _ in range(_n)]
     )
     color_controls = mo.ui.array(
         [mo.ui.dropdown(_color_names, value=default_color(i)) for i in range(_n)]
@@ -1185,6 +1320,75 @@ def _viewer_3d(
             b_ranges=b_ranges,
         )
     )
+    return
+
+
+@app.cell(hide_code=True)
+def _download_section(
+    compute_ipsae,
+    glob,
+    input_data,
+    mo,
+    os,
+    pred_out_root,
+    prediction_models,
+):
+    import io as _io
+    import zipfile as _zipfile
+    import pandas as _pd
+
+    _IPSAE_CUTOFF = 10.0  # Å — fixed cutoff used when saving scores to file
+    _job_name = input_data[0]["name"]
+
+    # Compute ipSAE scores (PAE cutoff 10 Å) and save to CSV so they end up
+    # in the zip archive. Skip models that have no full_data (atom-confidence
+    # disabled) or only a single chain.
+    _rows = []
+    for _m in prediction_models:
+        if _m["full_data"] is None:
+            continue
+        _scores = compute_ipsae(
+            _m["full_data"]["pae"],
+            _m["full_data"]["token_chain_ids"],
+            pae_cutoff=_IPSAE_CUTOFF,
+        )
+        for (_c1, _c2), _score in _scores.items():
+            _rows.append({
+                "Sample": f"Sample {_m['index']} (rank {_m['rank']})",
+                "Chain 1": _c1, "Chain 2": _c2,
+                "ipSAE": round(_score, 3),
+            })
+    _ipsae_df = _pd.DataFrame(_rows)
+
+    _ipsae_path = os.path.join(pred_out_root, _job_name, "ipsae_scores.csv")
+    if not _ipsae_df.empty:
+        os.makedirs(os.path.dirname(_ipsae_path), exist_ok=True)
+        _ipsae_df.to_csv(_ipsae_path, index=False)
+
+    def _make_zip() -> bytes:
+        buf = _io.BytesIO()
+        with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+            for _fp in sorted(glob.glob(os.path.join(pred_out_root, "**"), recursive=True)):
+                if os.path.isfile(_fp):
+                    zf.write(_fp, os.path.relpath(_fp, pred_out_root))
+        buf.seek(0)
+        return buf.read()
+
+    _ipsae_note = (
+        f"ipSAE scores (PAE cutoff {_IPSAE_CUTOFF} Å) saved to `{_job_name}/ipsae_scores.csv`."
+        if not _ipsae_df.empty
+        else "*(No multi-chain ipSAE scores — single chain or atom-confidence was disabled.)*"
+    )
+    mo.vstack([
+        mo.md("### Download results"),
+        mo.md(f"Includes all predicted structures, confidence JSON files, and {_ipsae_note}"),
+        mo.download(
+            data=_make_zip,
+            filename=f"{_job_name}_protenix.zip",
+            mimetype="application/zip",
+            label="Download results (.zip)",
+        ),
+    ])
     return
 
 

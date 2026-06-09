@@ -353,7 +353,7 @@ def _(mo, structure_labels, BASIC_COLORS, default_color):
         label="Visibility",
     )
     global_color_mode = mo.ui.dropdown(
-        ["Individual", "Solid color", "B-factor"],
+        ["Individual", "Solid color", "B-factor", "By chain"],
         value="Individual",
         label="Color mode",
     )
@@ -368,7 +368,7 @@ def _(mo, structure_labels, BASIC_COLORS, default_color):
         [mo.ui.checkbox(True) for _ in range(_n)]
     )
     color_mode_controls = mo.ui.array(
-        [mo.ui.dropdown(["Solid color", "B-factor"], value="Solid color") for _ in range(_n)]
+        [mo.ui.dropdown(["Solid color", "B-factor", "By chain"], value="Solid color") for _ in range(_n)]
     )
     color_controls = mo.ui.array(
         [mo.ui.dropdown(_color_names, value=default_color(i)) for i in range(_n)]
