@@ -435,7 +435,7 @@ def _model_ui(mo, use_constraints_ui):
         "protenix_tiny_default_v0.5.0",
     ]
     _DESC = {
-        "protenix-v2":                      "464 M · MSA + RNA MSA + Template  (newest, best quality)",
+        "protenix-v2":                      "464 M · MSA + RNA MSA + Template  (newest, best quality — weights from HuggingFace)",
         "protenix_base_default_v1.0.0":     "368 M · MSA + RNA MSA + Template",
         "protenix_base_20250630_v1.0.0":    "368 M · MSA + RNA MSA + Template · 2025-06 cutoff",
         "protenix_base_default_v0.5.0":     "368 M · MSA only",
@@ -983,6 +983,29 @@ def _run_inference(
         "--trimul_kernel", "cuequivariance" if _has_nvrtc else "torch",
         "--triatt_kernel", "cuequivariance" if _has_nvrtc else "torch",
     ]
+
+    # ── Pre-download protenix-v2 weights from HuggingFace if missing ─────────
+    # The upstream URL (protenix.tos-cn-beijing.volces.com) is unreachable
+    # outside China.  Weights are mirrored at TMF001/protenix-v2-weights on HF.
+    if effective_model == "protenix-v2":
+        import urllib.request as _urlreq
+        _ckpt_dir = os.path.join(weights_dir_ui.value, "checkpoint")
+        _ckpt_path = os.path.join(_ckpt_dir, "protenix-v2.pt")
+        if not os.path.isfile(_ckpt_path):
+            os.makedirs(_ckpt_dir, exist_ok=True)
+            _hf_url = (
+                "https://huggingface.co/TMF001/protenix-v2-weights"
+                "/resolve/main/protenix-v2.pt"
+            )
+            try:
+                with mo.status.spinner("Downloading protenix-v2 weights from HuggingFace (~500 MB)…"):
+                    _urlreq.urlretrieve(_hf_url, _ckpt_path)
+            except Exception as _dl_exc:
+                mo.stop(True, mo.callout(
+                    mo.md(f"**Weight download failed:** {_dl_exc}"),
+                    kind="danger",
+                ))
+    # ────────────────────────────────────────────────────────────────────────
 
     with mo.status.spinner("Running Protenix prediction…"):
         _result = subprocess.run(_cmd, env=_env, text=True)
