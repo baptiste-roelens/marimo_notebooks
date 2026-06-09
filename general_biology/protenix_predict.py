@@ -688,6 +688,7 @@ def _run_inference(
     Path,
     atom_conf_ui,
     dtype_ui,
+    glob,
     input_data,
     json,
     mo,
@@ -722,6 +723,53 @@ def _run_inference(
         _bi = str(Path(__file__).parent.parent / "runner" / "batch_inference.py")
         _cmd = [sys.executable, _bi, "pred"]
 
+    # ── Detect available CUDA facilities ────────────────────────────────────
+    # Protenix defaults to cuequivariance kernels for triangle ops; those load
+    # libcue_ops.so which dlopen()s libnvrtc.so.12 at runtime. On many GPU
+    # sandboxes the CUDA toolkit is installed but its lib64 directory is absent
+    # from LD_LIBRARY_PATH, causing an "cannot open shared object file" crash.
+    # We probe for libnvrtc on disk and inject the directory if found so the
+    # faster Blackwell-optimised kernels can be used.
+    _cuda_lib_dirs = {
+        os.path.dirname(p)
+        for pat in [
+            "/usr/local/cuda*/lib64/libnvrtc.so*",
+            "/usr/lib/x86_64-linux-gnu/libnvrtc.so*",
+            "/usr/lib/aarch64-linux-gnu/libnvrtc.so*",
+        ]
+        for p in glob.glob(pat)
+    }
+    # Also probe for the CUDA toolkit root via nvcc — needed for FusedLayerNorm
+    # JIT compilation (separate from the NVRTC runtime library above).
+    _nvcc_path = shutil.which("nvcc")
+    _cuda_home = None
+    if _nvcc_path:
+        _cuda_home = str(Path(_nvcc_path).resolve().parent.parent)
+    else:
+        for _cand in sorted(glob.glob("/usr/local/cuda*"), reverse=True):
+            if os.path.isfile(os.path.join(_cand, "bin", "nvcc")):
+                _cuda_home = _cand
+                break
+    if _cuda_home:
+        _cuda_lib_dirs.add(os.path.join(_cuda_home, "lib64"))
+
+    _has_nvrtc = bool(_cuda_lib_dirs)
+    _ld_parts = [d for d in _cuda_lib_dirs if d]
+    if os.environ.get("LD_LIBRARY_PATH"):
+        _ld_parts.append(os.environ["LD_LIBRARY_PATH"])
+
+    _env = {
+        **os.environ,
+        "PROTENIX_ROOT_DIR": weights_dir_ui.value,
+        # FusedLayerNorm: use Protenix's fused CUDA kernel if nvcc is available,
+        # else fall back to the plain PyTorch implementation (avoids the JIT
+        # compile step and the CUDA_HOME requirement).
+        "LAYERNORM_TYPE": "fast_layernorm" if _cuda_home else "torch_layernorm",
+        **({"CUDA_HOME": _cuda_home} if _cuda_home else {}),
+        **({"LD_LIBRARY_PATH": ":".join(_ld_parts)} if _ld_parts else {}),
+    }
+    # ────────────────────────────────────────────────────────────────────────
+
     _cmd += [
         "-i", _json_path,
         "-o", pred_out_root,
@@ -733,20 +781,11 @@ def _run_inference(
         "-d", dtype_ui.value,
         "--use_msa", str(use_msa_ui.value),
         "--need_atom_confidence", str(atom_conf_ui.value),
+        # Use cuequivariance kernels (Blackwell-optimised) when libnvrtc is
+        # accessible; fall back to pure PyTorch if the CUDA toolkit is absent.
+        "--trimul_kernel", "cuequivariance" if _has_nvrtc else "torch",
+        "--triatt_kernel", "cuequivariance" if _has_nvrtc else "torch",
     ]
-
-    # Protenix's fused LayerNorm CUDA kernel has no prebuilt wheel for every
-    # torch/CUDA/Python combination, so it falls back to JIT-compiling one with
-    # nvcc — which fails wherever only the CUDA *runtime* (no toolkit / no
-    # CUDA_HOME) is available, e.g. most hosted GPU sandboxes. Setting
-    # LAYERNORM_TYPE to anything other than "fast_layernorm" makes Protenix skip
-    # that import entirely and use its plain PyTorch LayerNorm instead — slightly
-    # slower, but avoids the JIT-compile step (and the CUDA_HOME crash) altogether.
-    _env = dict(
-        os.environ,
-        PROTENIX_ROOT_DIR=weights_dir_ui.value,
-        LAYERNORM_TYPE="torch_layernorm",
-    )
 
     with mo.status.spinner("Running Protenix prediction…"):
         _result = subprocess.run(_cmd, env=_env, text=True)

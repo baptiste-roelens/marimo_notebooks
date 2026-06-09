@@ -8,7 +8,7 @@ A collection of interactive [marimo](https://marimo.io) notebooks for common bio
 
 | Notebook | Description | Open |
 |----------|-------------|------|
-| [Protein Conservation Viewer](general_biology/protein_conservation.py) | Fetches orthologs from UniProt, aligns sequences with ClustalOmega, and compares them on both axes of conservation: an interactive MSA (with selectable color schemes, including % conservation) and superimposed AlphaFold structures (RMSD and TM-score, per-structure show/hide and B-factor coloring), plus a neighbour-joining phylogenetic tree. | |
+| [Protein Conservation Viewer](general_biology/protein_conservation.py) | Fetches orthologs from UniProt, aligns sequences with ClustalOmega, and compares them on both axes of conservation: an interactive MSA (with selectable color schemes, including % conservation) and superimposed AlphaFold structures (RMSD and TM-score, per-structure show/hide and B-factor coloring), plus a neighbour-joining phylogenetic tree. | [![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/notebooks/nb_EmobwA4vrbbjSJTfhXeLLt) |
 | [Protein Conservation Viewer (no widget)](general_biology/protein_conservation_no_widget.py) | Self-contained variant of the above that doesn't depend on the local `widget/` helpers — useful as a single-file reference or when running somewhere the `widget` package isn't available. | |
 
 ### Widgets
