@@ -138,7 +138,7 @@ def _(
                 _summary = normalize_summary(parse_prediction_json(_grp["summary"].contents), _source)
                 _atoms = parse_structure(_grp["model"].contents, _grp["model"].name)
                 _full_data = (
-                    normalize_full_data(parse_prediction_json(_grp["full_data"].contents), _source)
+                    normalize_full_data(parse_prediction_json(_grp["full_data"].contents), _source, _atoms)
                     if "full_data" in _grp else None
                 )
             except Exception as _e:

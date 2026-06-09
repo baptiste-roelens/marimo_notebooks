@@ -119,16 +119,21 @@ def tm_align_all(structures: list) -> tuple[list, list[float], list[float]]:
         ca_mob = mobile[(mobile.atom_name == "CA") & ~mobile.hetero]
         seq_mob = _ca_sequence(ca_mob)
         try:
+            # tm_align(x, y, ...) returns u/t that map x onto y (per tmtools'
+            # transform_structure docstring: `aligned_x = x @ u.T + t`), so pass
+            # the mobile structure as x and the reference as y — that way the
+            # returned transform can be applied directly to the mobile's
+            # coordinates to overlay it onto the (fixed) reference.
             result = tm_align(
-                ca_ref.coord.astype(np.float64),
                 ca_mob.coord.astype(np.float64),
-                seq_ref,
+                ca_ref.coord.astype(np.float64),
                 seq_mob,
+                seq_ref,
             )
             mobile_t = mobile.copy()
             mobile_t.coord = mobile.coord @ np.asarray(result.u).T + np.asarray(result.t)
             rmsd = float(result.rmsd)
-            tm_score = float(result.tm_norm_chain1)
+            tm_score = float(result.tm_norm_chain2)
         except Exception:
             mobile_t = mobile
             rmsd = float("nan")

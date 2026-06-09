@@ -19,6 +19,9 @@ _FILE_PATTERNS = {
     ("protenix",   "model"):     re.compile(r"_sample_(\d+)\.cif$", re.IGNORECASE),
     ("protenix",   "summary"):   re.compile(r"summary_confidence_sample_(\d+)\.json$", re.IGNORECASE),
     ("protenix",   "full_data"): re.compile(r"full_data_sample_(\d+)\.json$", re.IGNORECASE),
+    ("openfold3",  "model"):     re.compile(r"_sample_(\d+)_model\.(cif|pdb)$", re.IGNORECASE),
+    ("openfold3",  "summary"):   re.compile(r"_sample_(\d+)_confidences_aggregated\.json$", re.IGNORECASE),
+    ("openfold3",  "full_data"): re.compile(r"_sample_(\d+)_confidences\.(json|npz)$", re.IGNORECASE),
 }
 
 
@@ -91,10 +94,27 @@ def normalize_summary(raw: dict, source: str) -> dict:
     summary = dict(raw)
     if source == "protenix" and "fraction_disordered" not in summary and "disorder" in summary:
         summary["fraction_disordered"] = summary["disorder"]
+    elif source == "openfold3":
+        if "ranking_score" not in summary and "sample_ranking_score" in summary:
+            summary["ranking_score"] = summary["sample_ranking_score"]
+        if "fraction_disordered" not in summary and "disorder" in summary:
+            summary["fraction_disordered"] = summary["disorder"]
+        if "chain_pair_iptm" in summary and isinstance(summary["chain_pair_iptm"], dict):
+            # Convert dict of pair strings to a 2D matrix
+            chains = sorted(summary.get("chain_ptm", {}).keys())
+            n = len(chains)
+            mat = [[1.0] * n for _ in range(n)]
+            raw_pair = summary["chain_pair_iptm"]
+            for i, c1 in enumerate(chains):
+                for j, c2 in enumerate(chains):
+                    if i != j:
+                        val = raw_pair.get(f"({c1}, {c2})") or raw_pair.get(f"({c2}, {c1})") or 0.0
+                        mat[i][j] = val
+            summary["chain_pair_iptm"] = mat
     return summary
 
 
-def normalize_full_data(raw: dict, source: str) -> dict:
+def normalize_full_data(raw: dict, source: str, atoms=None) -> dict:
     """Map a raw full-data dict onto the AlphaFold3 schema the viewer expects.
 
     Protenix names the PAE matrix and per-token chain assignment differently —
@@ -111,6 +131,13 @@ def normalize_full_data(raw: dict, source: str) -> dict:
             full_data["token_chain_ids"] = [_chain_letter(a) for a in full_data["token_asym_id"]]
         if "atom_plddts" not in full_data and "atom_plddt" in full_data:
             full_data["atom_plddts"] = full_data["atom_plddt"]
+    elif source == "openfold3":
+        if "token_chain_ids" not in full_data and atoms is not None:
+            import biotite.structure as struc
+            starts = struc.get_residue_starts(atoms)
+            full_data["token_chain_ids"] = [atoms.chain_id[idx] for idx in starts]
+        if "atom_plddts" not in full_data and "plddt" in full_data:
+            full_data["atom_plddts"] = full_data["plddt"]
     return full_data
 
 
