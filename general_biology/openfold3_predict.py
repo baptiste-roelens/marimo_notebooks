@@ -2,6 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "marimo>=0.9",
+#     "openfold3",
 #     "biotite>=1.6.0",
 #     "numpy>=2.4.0",
 #     "pandas>=2.0.0",
@@ -752,6 +753,7 @@ def _run_section(mo):
 
 @app.cell(hide_code=True)
 def _run_inference(
+    Path,
     _job_name,
     glob,
     input_data,
@@ -792,6 +794,20 @@ def _run_inference(
             ),
         )
 
+    # ── Detect CUDA_HOME (deepspeed checks it at import time) ─────────────────
+    _nvcc = shutil.which("nvcc")
+    _cuda_home = None
+    if _nvcc:
+        _cuda_home = str(Path(_nvcc).resolve().parent.parent)
+    else:
+        for _cand in sorted(glob.glob("/usr/local/cuda*"), reverse=True):
+            if os.path.isfile(os.path.join(_cand, "bin", "nvcc")):
+                _cuda_home = _cand
+                break
+    _env = {**os.environ}
+    if _cuda_home:
+        _env["CUDA_HOME"] = _cuda_home
+
     # ── Check / download model weights ─────────────────────────────────────────
     _weights_dir = weights_dir_ui.value
     os.makedirs(_weights_dir, exist_ok=True)
@@ -801,23 +817,23 @@ def _run_inference(
         + glob.glob(os.path.join(_weights_dir, "*.npz"))
     )
     if not _ckpt_files:
-        with mo.status.spinner("Downloading OpenFold3 model weights…"):
-            _dl = subprocess.run(
-                [_exe, "download_params", "--output_dir", _weights_dir],
-                text=True,
-                capture_output=True,
-            )
-        if _dl.returncode != 0:
+        import urllib.request as _urlreq
+        _ckpt_dest = os.path.join(_weights_dir, "of3-p2-155k.pt")
+        _https_url = "https://openfold.s3.amazonaws.com/staging/of3-p2-155k.pt"
+        try:
+            with mo.status.spinner("Downloading OpenFold3 weights (~600 MB)…"):
+                _urlreq.urlretrieve(_https_url, _ckpt_dest)
+        except Exception as _dl_exc:
             mo.stop(
                 True,
                 mo.callout(
                     mo.md(
-                        "Model weights not found and automatic download failed "
-                        f"(exit code {_dl.returncode}).  \n\n"
-                        "Please download weights manually following the "
-                        "[OpenFold3 setup instructions](https://github.com/aqlaboratory/openfold-3#model-parameters) "
-                        "and set the weights directory above.\n\n"
-                        f"```\n{_dl.stderr[-2000:]}\n```"
+                        "Model weights not found and automatic download failed.  \n\n"
+                        "Download manually with:\n"
+                        "```\n"
+                        f"aws s3 cp s3://openfold/staging/of3-p2-155k.pt {_ckpt_dest} --no-sign-request\n"
+                        "```\n"
+                        f"Error: `{_dl_exc}`"
                     ),
                     kind="danger",
                 ),
@@ -898,7 +914,7 @@ def _run_inference(
     _cmd = [_exe, "predict", "--query_json", _json_path, "--runner_yaml", _yaml_path]
 
     with mo.status.spinner("Running OpenFold3 prediction… (this may take several minutes)"):
-        _result = subprocess.run(_cmd, text=True, capture_output=True)
+        _result = subprocess.run(_cmd, text=True, capture_output=True, env=_env)
 
     if _result.returncode != 0:
         inference_ok = False
