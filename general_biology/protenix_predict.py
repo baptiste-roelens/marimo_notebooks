@@ -364,29 +364,39 @@ def _header(mo):
     mo.md("""
     # Protenix Structure Prediction
 
-    Run protein structure prediction locally using
-    [Protenix](https://github.com/bytedance/protenix).
-    Model weights and data cache are downloaded automatically on the first run.
+    [Protenix](https://github.com/bytedance/protenix) is ByteDance's open-source
+    implementation of an AlphaFold3-like model for biomolecular structure prediction.
+    It jointly models any combination of **proteins, DNA, RNA, small-molecule ligands**
+    (by CCD code or SMILES), and **ions** in a single prediction run, and produces
+    ranked structural models together with full confidence metrics (pTM, ipTM, ipSAE, PAE).
 
-    Results are explored with the same confidence-metrics, PAE/ipSAE and
-    multi-model 3D structure viewer as the AlphaFold3 prediction viewer widget —
-    so Protenix and AlphaFold Server outputs can be compared side by side.
+    ### Inputs
+    | Type | How to specify |
+    |------|---------------|
+    | Protein | Amino-acid sequence (single-letter codes) |
+    | DNA | Nucleotide sequence (A/T/G/C) |
+    | RNA | Nucleotide sequence (A/U/G/C) |
+    | Ligand | CCD code (e.g. `ATP`) or SMILES string |
+    | Ion | Ion symbol (e.g. `MG`, `ZN`, `CA`) |
 
-    This notebook declares its own dependencies (PEP 723 inline metadata) —
-    launch it in an isolated, notebook-specific environment managed by
-    [`uv`](https://docs.astral.sh/uv/) with:
+    Use **count > 1** to model multiple copies of the same chain (e.g. a homodimer).
 
-    ```
-    uvx marimo edit --sandbox marimo/predict.py
-    ```
+    ### Models
+    | Model | Highlights |
+    |-------|-----------|
+    | `protenix-v2` | Highest accuracy; MSA + RNA MSA + templates |
+    | `protenix_base_default_v1.0.0` | Strong general-purpose; MSA + templates |
+    | `protenix_base_default_v0.5.0` | Balanced; MSA only |
+    | `protenix_base_constraint_v0.5.0` | Supports structural constraints |
+    | `protenix_mini_default_v0.5.0` | Fast; good for initial runs |
+    | `protenix_mini_esm/ism_v0.5.0` | Mini + ESM or ISM sequence embeddings |
+    | `protenix_tiny_default_v0.5.0` | Fastest; use for quick checks |
 
-    (or `marimo run --sandbox marimo/predict.py` to view it read-only). No
-    `pip install` needed — `uv` resolves and caches the environment for you,
-    separate from the rest of the repo.
+    Model weights (~100–500 MB) are downloaded automatically to the cache directory
+    on first use.
 
-    **Quick start:** enter a protein sequence, pick
-    `protenix_mini_default_v0.5.0`, set 1 sample / 5 steps, click
-    **▶ Run Prediction**.
+    **Quick start:** enter a protein sequence, keep `protenix_mini_default_v0.5.0`,
+    set 1 seed / 5 samples, click **▶ Run Prediction**.
     """)
     return
 
@@ -649,97 +659,134 @@ def _params_widgets(mo):
 @app.cell(hide_code=True)
 def _constraints_ui(mo):
     use_constraints_ui = mo.ui.switch(value=False, label="Use structural constraints")
-    constraint_text_ui = mo.ui.text_area(
-        value="",
-        placeholder=(
-            '{\n  "contact": [\n    {\n'
-            '      "entity1": 1, "copy1": 1, "position1": 10,\n'
-            '      "entity2": 2, "copy2": 1, "position2": 20,\n'
-            '      "max_distance": 8.0\n    }\n  ]\n}'
-        ),
-        label="Constraint JSON",
-        rows=8,
-        full_width=True,
-    )
+    n_contact_ui = mo.ui.dropdown(list(range(11)), value=0, label="Contact constraints")
+    use_pocket_ui = mo.ui.switch(value=False, label="Add pocket constraint")
+    n_pocket_residues_ui = mo.ui.dropdown(list(range(1, 21)), value=1, label="Pocket residues")
     mo.vstack([mo.md("## Constraints"), use_constraints_ui])
-    return constraint_text_ui, use_constraints_ui
+    return n_contact_ui, n_pocket_residues_ui, use_constraints_ui, use_pocket_ui
 
 
 @app.cell(hide_code=True)
-def _constraints_detail(constraint_text_ui, mo, use_constraints_ui):
+def _constraints_detail(mo, n_contact_ui, n_pocket_residues_ui, use_constraints_ui, use_pocket_ui):
     mo.stop(not use_constraints_ui.value)
     mo.vstack([
         mo.callout(
             mo.md(
-                "Only `protenix_base_constraint_v0.5.0` supports constraints — "
-                "the model will be forced to this checkpoint regardless of the "
-                "model selected above."
+                "**Model forced to `protenix_base_constraint_v0.5.0`** — the only checkpoint "
+                "that supports constraints.  \n"
+                "Indices are **1-based**: `entity` = position of the chain in the *sequences* "
+                "list; `copy` = which instance when `count > 1`; `position` = residue number "
+                "within that chain."
             ),
-            kind="warn",
+            kind="info",
         ),
-        mo.md(r"""
-**Protenix uses 1-based `entity` / `copy` / `position` indices** — not chain letters.
-`entity` is the 1-based position of the chain in your *sequences* list; `copy` selects a
-specific instance when an entity has `count > 1`; `position` is the 1-based residue index
-within that chain. This differs from AlphaFold3-style `chain`/`residue` notation.
-
-#### Contact — residue level
-Forces two residues to be within `max_distance` Å of each other:
-```json
-{
-  "contact": [
-    {
-      "entity1": 1, "copy1": 1, "position1": 10,
-      "entity2": 2, "copy2": 1, "position2": 20,
-      "max_distance": 8.0,
-      "min_distance": 0.0
-    }
-  ]
-}
-```
-
-#### Contact — atom level
-Add `"atom1"` and `"atom2"` (atom name strings, e.g. `"CA"`, `"CB"`) to constrain specific atoms:
-```json
-{"contact": [{"entity1":1,"copy1":1,"position1":10,"atom1":"CA",
-              "entity2":2,"copy2":1,"position2":20,"atom2":"CB",
-              "max_distance":6.0}]}
-```
-
-#### Pocket — binding site
-Specifies that the binder chain should dock within `max_distance` Å of the listed receptor residues:
-```json
-{
-  "pocket": {
-    "binder_chain": {"entity": 1, "copy": 1},
-    "max_distance": 8.0,
-    "contact_residues": [
-      {"entity": 2, "copy": 1, "position": 10},
-      {"entity": 2, "copy": 1, "position": 11}
-    ]
-  }
-}
-```
-
-Multiple constraint types can be combined in the same object: `{"contact": [...], "pocket": {...}}`.
-        """),
-        constraint_text_ui,
+        mo.md("### Contact constraints"),
+        n_contact_ui,
+        mo.md("### Pocket constraint"),
+        mo.hstack(
+            [use_pocket_ui, *([n_pocket_residues_ui] if use_pocket_ui.value else [])],
+            justify="start",
+            gap="2rem",
+        ),
     ])
     return
 
 
 @app.cell(hide_code=True)
+def _contact_forms_ui(mo, n_contact_ui, use_constraints_ui):
+    contact_forms_ui = mo.ui.array([
+        mo.ui.dictionary({
+            "entity1":      mo.ui.number(start=1, stop=20, value=1, label="Entity 1"),
+            "copy1":        mo.ui.number(start=1, stop=20, value=1, label="Copy 1"),
+            "position1":    mo.ui.number(start=1, stop=9999, value=1, label="Pos. 1"),
+            "atom1":        mo.ui.text(value="", placeholder="e.g. CA", label="Atom 1 (opt.)"),
+            "entity2":      mo.ui.number(start=1, stop=20, value=1, label="Entity 2"),
+            "copy2":        mo.ui.number(start=1, stop=20, value=1, label="Copy 2"),
+            "position2":    mo.ui.number(start=1, stop=9999, value=1, label="Pos. 2"),
+            "atom2":        mo.ui.text(value="", placeholder="e.g. CA", label="Atom 2 (opt.)"),
+            "max_distance": mo.ui.number(start=0.0, stop=50.0, value=8.0, step=0.5, label="Max dist (Å)"),
+        })
+        for _ in range(int(n_contact_ui.value))
+    ])
+    (
+        mo.vstack(
+            [
+                mo.hstack(
+                    [
+                        mo.Html(f'<b style="min-width:80px;line-height:2">Contact {i + 1}</b>'),
+                        mo.vstack([
+                            mo.hstack(
+                                [f["entity1"], f["copy1"], f["position1"], f["atom1"]],
+                                justify="start", gap="0.75rem",
+                            ),
+                            mo.hstack(
+                                [f["entity2"], f["copy2"], f["position2"], f["atom2"]],
+                                justify="start", gap="0.75rem",
+                            ),
+                            f["max_distance"],
+                        ], gap="0.25rem"),
+                    ],
+                    gap="1rem",
+                    align="start",
+                )
+                for i, f in enumerate(contact_forms_ui)
+            ]
+        )
+        if use_constraints_ui.value and int(n_contact_ui.value) > 0
+        else None
+    )
+    return (contact_forms_ui,)
+
+
+@app.cell(hide_code=True)
+def _pocket_forms_ui(mo, n_pocket_residues_ui, use_constraints_ui, use_pocket_ui):
+    pocket_binder_ui = mo.ui.dictionary({
+        "entity":       mo.ui.number(start=1, stop=20, value=1, label="Binder entity"),
+        "copy":         mo.ui.number(start=1, stop=20, value=1, label="Binder copy"),
+        "max_distance": mo.ui.number(start=0.0, stop=50.0, value=8.0, step=0.5, label="Max dist (Å)"),
+    })
+    pocket_residues_ui = mo.ui.array([
+        mo.ui.dictionary({
+            "entity":   mo.ui.number(start=1, stop=20, value=1, label=f"Res {i + 1} entity"),
+            "copy":     mo.ui.number(start=1, stop=20, value=1, label=f"Res {i + 1} copy"),
+            "position": mo.ui.number(start=1, stop=9999, value=1, label=f"Res {i + 1} pos."),
+        })
+        for i in range(int(n_pocket_residues_ui.value))
+    ])
+    (
+        mo.vstack([
+            mo.md("**Binder chain:**"),
+            mo.hstack(
+                [pocket_binder_ui["entity"], pocket_binder_ui["copy"], pocket_binder_ui["max_distance"]],
+                justify="start", gap="0.75rem",
+            ),
+            mo.md("**Pocket residues** (receptor side):"),
+            *[
+                mo.hstack([r["entity"], r["copy"], r["position"]], justify="start", gap="0.75rem")
+                for r in pocket_residues_ui
+            ],
+        ])
+        if use_constraints_ui.value and use_pocket_ui.value
+        else None
+    )
+    return pocket_binder_ui, pocket_residues_ui
+
+
+@app.cell(hide_code=True)
 def _build_json(
-    constraint_text_ui,
+    contact_forms_ui,
     dna_forms_ui,
     ion_forms_ui,
     job_name_ui,
     json,
     ligand_forms_ui,
     mo,
+    pocket_binder_ui,
+    pocket_residues_ui,
     protein_forms_ui,
     rna_forms_ui,
     use_constraints_ui,
+    use_pocket_ui,
 ):
     _sequences = []
     for _f in protein_forms_ui.value:
@@ -764,12 +811,37 @@ def _build_json(
             _sequences.append({"ion": {"ion": _ion, "count": int(_f["count"])}})
 
     _constraint = {}
-    _constraint_error = ""
-    if use_constraints_ui.value and constraint_text_ui.value.strip():
-        try:
-            _constraint = json.loads(constraint_text_ui.value)
-        except Exception as _e:
-            _constraint_error = f"Invalid constraint JSON: {_e}"
+    if use_constraints_ui.value:
+        _contacts = []
+        for _f in contact_forms_ui.value:
+            _c = {
+                "entity1": int(_f["entity1"]), "copy1": int(_f["copy1"]), "position1": int(_f["position1"]),
+                "entity2": int(_f["entity2"]), "copy2": int(_f["copy2"]), "position2": int(_f["position2"]),
+                "max_distance": float(_f["max_distance"]),
+            }
+            if str(_f.get("atom1", "")).strip():
+                _c["atom1"] = str(_f["atom1"]).strip()
+            if str(_f.get("atom2", "")).strip():
+                _c["atom2"] = str(_f["atom2"]).strip()
+            _contacts.append(_c)
+        if _contacts:
+            _constraint["contact"] = _contacts
+        if use_pocket_ui.value:
+            _constraint["pocket"] = {
+                "binder_chain": {
+                    "entity": int(pocket_binder_ui.value["entity"]),
+                    "copy": int(pocket_binder_ui.value["copy"]),
+                },
+                "max_distance": float(pocket_binder_ui.value["max_distance"]),
+                "contact_residues": [
+                    {
+                        "entity": int(_r["entity"]),
+                        "copy": int(_r["copy"]),
+                        "position": int(_r["position"]),
+                    }
+                    for _r in pocket_residues_ui.value
+                ],
+            }
 
     input_data = [
         {
@@ -786,14 +858,7 @@ def _build_json(
         language="json",
         label="Input JSON preview (edit fields above to update)",
     )
-    mo.vstack([
-        mo.md("## JSON preview"),
-        *(
-            [mo.callout(mo.md(_constraint_error), kind="danger")]
-            if _constraint_error else []
-        ),
-        json_preview_ui,
-    ])
+    mo.vstack([mo.md("## JSON preview"), json_preview_ui])
     return (input_data,)
 
 
