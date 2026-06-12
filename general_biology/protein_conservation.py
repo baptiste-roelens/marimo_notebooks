@@ -270,7 +270,7 @@ def _(mo):
 
     > **Good proteins to try:** *actin*, *histone H3*, *PCNA* (near-universal conservation);
     > *cytochrome c*, *ubiquitin* (extreme sequence conservation across eukaryotes);
-    > *globins* (moderate sequence divergence, highly conserved fold — a textbook example
+    > *globins*, *Triosephosphate isomerase*(moderate sequence divergence, highly conserved fold — a textbook example
     > of sequence vs. structure conservation).
     """)
     return
@@ -285,7 +285,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     protein_name = mo.ui.text(
-        placeholder="e.g. Insulin, hemoglobin, Actin …",
+        placeholder="e.g. Triosephosphate isomerase, Actin …",
         label="Protein name",
         full_width=True,
     )
@@ -494,7 +494,13 @@ def _(align_btn, mo, ortholog_table, orthologs_df, run_clustalo):
     )
     _sel_accs = _sel["Accession"].tolist()
 
+    # Use the species name (not the accession) as the sequence id, so the MSA
+    # viewer and phylogenetic tree show species rather than opaque accessions.
+    # Disambiguate duplicate species (possible for 1:n HOG members) with a suffix.
+    import re as _re
+
     _fastas = []
+    _label_counts: dict[str, int] = {}
     for _acc in _sel_accs:
         _row = orthologs_df.loc[orthologs_df["accession"] == _acc].iloc[0]
         _seq = _row["sequence"]
@@ -504,7 +510,12 @@ def _(align_btn, mo, ortholog_table, orthologs_df, run_clustalo):
             )
             continue
         _org = _row["organism"].split("(")[0].strip()
-        _fastas.append(f">{_acc} {_org}\n{_seq}")
+        _label = _re.sub(r"[^A-Za-z0-9]+", "_", _org).strip("_")
+        _n = _label_counts.get(_label, 0)
+        _label_counts[_label] = _n + 1
+        if _n:
+            _label = f"{_label}_{_n + 1}"
+        _fastas.append(f">{_label} {_acc}\n{_seq}")
 
     mo.stop(
         len(_fastas) < 2,
@@ -546,17 +557,22 @@ def _(aligned_fasta, mo, ref_acc):
     mo.stop(not aligned_fasta, mo.md(""))
 
     _alignment = _AlignIO2.read(_StringIO2(aligned_fasta), "fasta")
-    _records = {_rec.id: _rec for _rec in _alignment}
+    _records = list(_alignment)
 
+    # The sequence id is the species label; the accession is the second token
+    # of the description (see the alignment cell above).
+    _query_rec = next(
+        (_rec for _rec in _records if _rec.description.split()[-1] == ref_acc), None
+    )
     mo.stop(
-        ref_acc not in _records,
+        _query_rec is None,
         mo.callout(mo.md(f"Reference **{ref_acc}** not found in alignment."), kind="warn"),
     )
-    _query_seq = str(_records[ref_acc].seq)
+    _query_seq = str(_query_rec.seq)
 
     _rows = []
-    for _rid, _rec in _records.items():
-        if _rid == ref_acc:
+    for _rec in _records:
+        if _rec is _query_rec:
             continue
         _seq = str(_rec.seq)
         _both = _ident = 0
@@ -566,8 +582,12 @@ def _(aligned_fasta, mo, ref_acc):
                 if _q == _s:
                     _ident += 1
         _pct = 100 * _ident / _both if _both else 0.0
-        _, _, _org = _rec.description.partition(" ")
-        _rows.append({"Accession": _rid, "Organism": _org, "% Identity to query": round(_pct, 1)})
+        _acc_token = _rec.description.split()[-1]
+        _rows.append({
+            "Species": _rec.id.replace("_", " "),
+            "Accession": _acc_token,
+            "% Identity to query": round(_pct, 1),
+        })
 
     conservation_df = (
         _pd2.DataFrame(_rows)
