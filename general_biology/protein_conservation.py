@@ -58,6 +58,7 @@ def _():
     UNIPROT_BASE  = "https://rest.uniprot.org/uniprotkb"
     AFDB_BASE     = "https://alphafold.ebi.ac.uk/api/prediction"
     CLUSTALO_BASE = "https://www.ebi.ac.uk/Tools/services/rest/clustalo"
+    OMA_BASE      = "https://omabrowser.org/api"
 
     HEADERS = {"User-Agent": "ProteinConservationViewer/1.0 (contact: user@example.com)"}
 
@@ -107,27 +108,47 @@ def _():
             return pd.DataFrame(columns=["accession","gene","organism","taxon_id","length","description"])
         return pd.DataFrame([_parse_entry(e) for e in results])
 
-    def get_orthologs_by_gene(gene_name: str, size: int = 100) -> pd.DataFrame:
-        params = {
-            "query":  f"gene_exact:{gene_name} AND reviewed:true",
-            "format": "json",
-            "size":   size,
-            "fields": "accession,gene_names,organism_name,organism_id,length,protein_name",
-        }
-        r = requests.get(f"{UNIPROT_BASE}/search", params=params, headers=HEADERS, timeout=15)
+    # ── OMA (Orthologous MAtrix) ─────────────────────────────────────────────
+    # Orthology inferred from genome-wide phylogenetic analysis (Hierarchical
+    # Orthologous Groups), so it finds true orthologs even when historical gene
+    # naming diverges across species — unlike matching on gene name in UniProt.
+
+    def get_oma_protein(accession: str) -> dict | None:
+        try:
+            r = requests.get(f"{OMA_BASE}/protein/{accession}/", headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return None
+
+    def get_orthologs_by_accession(accession: str, size: int = 30) -> pd.DataFrame:
+        r = requests.get(f"{OMA_BASE}/protein/{accession}/orthologs/", headers=HEADERS, timeout=30)
         r.raise_for_status()
-        rows = [_parse_entry(e) for e in r.json().get("results", [])]
-        df = pd.DataFrame(rows) if rows else pd.DataFrame(
-            columns=["accession","gene","organism","taxon_id","length","description"]
-        )
+        entries = r.json()
+        # 1:1 orthologs (no recent duplication on either side) are the cleanest
+        # comparisons; among those, prefer higher OMA similarity scores.
+        entries.sort(key=lambda o: (o.get("rel_type") != "1:1", -o.get("score", 0)))
+        entries = entries[:size]
+
+        rows = []
+        for o in entries:
+            detail = get_oma_protein(str(o["entry_nr"]))
+            if detail is None:
+                continue
+            rows.append({
+                "accession":   detail.get("canonicalid") or detail.get("omaid", ""),
+                "organism":    o["species"]["species"],
+                "taxon_id":    str(o["species"]["taxon_id"]),
+                "length":      detail.get("sequence_length", 0),
+                "description": detail.get("description", ""),
+                "rel_type":    o.get("rel_type", ""),
+                "sequence":    detail.get("sequence", ""),
+            })
+        columns = ["accession","organism","taxon_id","length","description","rel_type","sequence"]
+        df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
         if not df.empty:
             df["has_afdb"] = df["accession"].apply(check_afdb)
         return df
-
-    def get_fasta(accession: str) -> str:
-        r = requests.get(f"{UNIPROT_BASE}/{accession}.fasta", headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        return r.text.strip()
 
     # ── AFDB ──────────────────────────────────────────────────────────────────
 
@@ -194,11 +215,12 @@ def _():
         atoms_to_pdb_str,
         build_msaviz_figure,
         build_structure_html,
+        check_afdb,
         default_color,
         fetch_pdb,
         get_b_range,
-        get_fasta,
-        get_orthologs_by_gene,
+        get_oma_protein,
+        get_orthologs_by_accession,
         parse_pdb_str,
         run_clustalo,
         search_uniprot,
@@ -293,9 +315,12 @@ def _(mo):
     mo.md(r"""
     ### Step 2 — Select orthologs to compare
 
-    The table below lists all **reviewed Swiss-Prot entries** carrying the same gene name,
-    each from a different organism. These are the orthologs — proteins that descend from a
-    common ancestral gene and perform the same biological role.
+    The table below lists **orthologs** of the reference protein — proteins in other species
+    that descend from the same ancestral gene and perform the same biological role — as
+    inferred by [OMA](https://omabrowser.org) from genome-wide phylogenetic analysis. Unlike
+    matching on gene name, this finds true orthologs even when historical naming conventions
+    diverge across species. **Relation** shows whether the match is a clean 1:1 ortholog or
+    a 1:n relationship (the target species has additional in-paralogs).
 
     Select **≥ 2 entries** (checkboxes) to include in the comparison. The **AF structure**
     column (✓/✗) indicates whether an AlphaFold prediction is available; include entries
@@ -305,7 +330,9 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_orthologs_by_gene, mo, search_table):
+def _(check_afdb, get_oma_protein, get_orthologs_by_accession, mo, search_table):
+    import pandas as _pd
+
     mo.stop(
         search_table.value is None or len(search_table.value) == 0,
         mo.callout(mo.md("Select a reference protein in the table above."), kind="info"),
@@ -313,25 +340,44 @@ def _(get_orthologs_by_gene, mo, search_table):
     ref_entry = search_table.value.iloc[0]
     ref_gene  = ref_entry["gene"]
     ref_acc   = ref_entry["accession"]
-    mo.stop(
-        not ref_gene,
-        mo.callout(mo.md("The selected entry has no gene name — cannot search for orthologs."), kind="warn"),
-    )
-    with mo.status.spinner(f"Searching orthologs of **{ref_gene}** across species…"):
-        orthologs_df = get_orthologs_by_gene(ref_gene)
+
+    with mo.status.spinner(f"Searching orthologs of **{ref_acc}** via OMA…"):
+        try:
+            orthologs_df = get_orthologs_by_accession(ref_acc)
+        except Exception as _e:
+            mo.stop(True, mo.callout(
+                mo.md(f"OMA lookup failed for **{ref_acc}**: {_e}. "
+                      "This protein may not be covered by OMA's genome set."),
+                kind="warn",
+            ))
+        _ref_detail = get_oma_protein(ref_acc)
+
+    if _ref_detail is not None:
+        _ref_row = _pd.DataFrame([{
+            "accession":   ref_acc,
+            "organism":    _ref_detail["species"]["species"],
+            "taxon_id":    str(_ref_detail["species"]["taxon_id"]),
+            "length":      _ref_detail.get("sequence_length", 0),
+            "description": _ref_detail.get("description", ref_entry["description"]),
+            "rel_type":    "reference",
+            "sequence":    _ref_detail.get("sequence", ""),
+            "has_afdb":    check_afdb(ref_acc),
+        }])
+        orthologs_df = _pd.concat([_ref_row, orthologs_df], ignore_index=True)
+
     mo.stop(
         orthologs_df.empty,
-        mo.callout(mo.md(f"No reviewed orthologs found for gene **{ref_gene}**."), kind="warn"),
+        mo.callout(mo.md(f"No orthologs found for **{ref_acc}** in OMA."), kind="warn"),
     )
-    display_df = orthologs_df.copy()
+    display_df = orthologs_df.drop(columns=["sequence"]).copy()
     display_df["has_afdb"] = display_df["has_afdb"].map({True: "✓", False: "✗"})
     display_df = display_df.rename(columns={
         "accession":   "Accession",
-        "gene":        "Gene",
         "organism":    "Organism",
         "taxon_id":    "Taxon ID",
         "length":      "Length (aa)",
         "description": "Protein name",
+        "rel_type":    "Relation",
         "has_afdb":    "AF structure",
     })
     return display_df, orthologs_df, ref_acc, ref_gene
@@ -341,12 +387,12 @@ def _(get_orthologs_by_gene, mo, search_table):
 def _(display_df, mo, orthologs_df, ref_acc, ref_gene):
     _n   = len(orthologs_df)
     _acc = ref_acc
-    _gen = ref_gene
+    _gen = ref_gene or _acc
     ortholog_table = mo.ui.table(
         display_df,
         selection="multi",
         label=(
-            f"Found **{_n}** reviewed entries for *{_gen}* "
+            f"Found **{_n}** orthologs (incl. reference) of *{_gen}* "
             f"(ref: **{_acc}**) — select ≥ 2 to align:"
         ),
         pagination=True,
@@ -396,7 +442,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(align_btn, get_fasta, mo, ortholog_table, run_clustalo):
+def _(align_btn, mo, ortholog_table, orthologs_df, run_clustalo):
     mo.stop(
         not align_btn.value,
         mo.callout(mo.md("Click **Compute alignment** to run Clustal Omega."), kind="info"),
@@ -408,15 +454,17 @@ def _(align_btn, get_fasta, mo, ortholog_table, run_clustalo):
     )
     _sel_accs = _sel["Accession"].tolist()
 
-    with mo.status.spinner("Fetching sequences from UniProt…"):
-        _fastas = []
-        for _acc in _sel_accs:
-            try:
-                _fastas.append(get_fasta(_acc))
-            except Exception as _e:
-                mo.output.append(
-                    mo.callout(mo.md(f"Could not fetch sequence for {_acc}: {_e}"), kind="warn")
-                )
+    _fastas = []
+    for _acc in _sel_accs:
+        _row = orthologs_df.loc[orthologs_df["accession"] == _acc].iloc[0]
+        _seq = _row["sequence"]
+        if not _seq:
+            mo.output.append(
+                mo.callout(mo.md(f"No sequence available for {_acc}"), kind="warn")
+            )
+            continue
+        _org = _row["organism"].split("(")[0].strip()
+        _fastas.append(f">{_acc} {_org}\n{_seq}")
 
     mo.stop(
         len(_fastas) < 2,
@@ -568,7 +616,7 @@ def _(
             if _pdb:
                 _pdbs_raw.append(_pdb)
                 _org = _row["organism"].split("(")[0].strip()
-                struct_labels.append(f"{_row['gene']} | {_org}")
+                struct_labels.append(f"{_row['accession']} | {_org}")
 
     mo.stop(
         len(_pdbs_raw) == 0,
