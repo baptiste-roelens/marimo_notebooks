@@ -485,6 +485,60 @@ def _(align_btn, mo, ortholog_table, orthologs_df, run_clustalo):
 
 
 @app.cell(hide_code=True)
+def _(mo, aligned_fasta):
+    mo.stop(not aligned_fasta, mo.md(""))
+    mo.md(r"""
+    #### Pairwise identity to query
+
+    The table below reports the percentage of identical residues between the reference
+    (query) sequence and each ortholog, computed over the alignment columns where both
+    sequences have a residue (gap columns excluded).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(aligned_fasta, mo, ref_acc):
+    import pandas as _pd2
+    from Bio import AlignIO as _AlignIO2
+    from io import StringIO as _StringIO2
+
+    mo.stop(not aligned_fasta, mo.md(""))
+
+    _alignment = _AlignIO2.read(_StringIO2(aligned_fasta), "fasta")
+    _records = {_rec.id: _rec for _rec in _alignment}
+
+    mo.stop(
+        ref_acc not in _records,
+        mo.callout(mo.md(f"Reference **{ref_acc}** not found in alignment."), kind="warn"),
+    )
+    _query_seq = str(_records[ref_acc].seq)
+
+    _rows = []
+    for _rid, _rec in _records.items():
+        if _rid == ref_acc:
+            continue
+        _seq = str(_rec.seq)
+        _both = _ident = 0
+        for _q, _s in zip(_query_seq, _seq):
+            if _q != "-" and _s != "-":
+                _both += 1
+                if _q == _s:
+                    _ident += 1
+        _pct = 100 * _ident / _both if _both else 0.0
+        _, _, _org = _rec.description.partition(" ")
+        _rows.append({"Accession": _rid, "Organism": _org, "% Identity to query": round(_pct, 1)})
+
+    conservation_df = (
+        _pd2.DataFrame(_rows)
+        .sort_values("% Identity to query", ascending=False)
+        .reset_index(drop=True)
+    )
+    mo.ui.table(conservation_df, selection=None)
+    return (conservation_df,)
+
+
+@app.cell(hide_code=True)
 def _(mo, aligned_fasta, PYMSAVIZ_SCHEMES):
     mo.stop(
         not aligned_fasta,
