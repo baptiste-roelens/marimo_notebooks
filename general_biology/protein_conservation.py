@@ -121,30 +121,40 @@ def _():
         except Exception:
             return None
 
-    def get_orthologs_by_accession(accession: str, size: int = 30) -> pd.DataFrame:
-        r = requests.get(f"{OMA_BASE}/protein/{accession}/orthologs/", headers=HEADERS, timeout=30)
+    def get_hog_members(hog_id: str, level: str, size: int = 30) -> pd.DataFrame:
+        # HOGs (Hierarchical Orthologous Groups) relate genes through duplication/
+        # speciation events. Querying at a broader taxonomic level reaches further
+        # back in evolutionary time, surfacing more divergent orthologs (lower
+        # sequence identity) than the strict, sequence-similar OMA Groups.
+        r = requests.get(
+            f"{OMA_BASE}/hog/{hog_id}/members/",
+            params={"level": level},
+            headers=HEADERS,
+            timeout=30,
+        )
         r.raise_for_status()
-        entries = r.json()
-        # 1:1 orthologs (no recent duplication on either side) are the cleanest
-        # comparisons; among those, prefer higher OMA similarity scores.
-        entries.sort(key=lambda o: (o.get("rel_type") != "1:1", -o.get("score", 0)))
-        entries = entries[:size]
+        members = r.json().get("members", [])
+        if len(members) > size:
+            # Sample evenly across the list to keep a broad taxonomic spread
+            # rather than just taking the first `size` (often clustered together).
+            step = len(members) / size
+            members = [members[int(i * step)] for i in range(size)]
 
         rows = []
-        for o in entries:
-            detail = get_oma_protein(str(o["entry_nr"]))
+        for m in members:
+            detail = get_oma_protein(str(m["entry_nr"]))
             if detail is None:
                 continue
             rows.append({
                 "accession":   detail.get("canonicalid") or detail.get("omaid", ""),
-                "organism":    o["species"]["species"],
-                "taxon_id":    str(o["species"]["taxon_id"]),
+                "organism":    m["species"]["species"],
+                "taxon_id":    str(m["species"]["taxon_id"]),
                 "length":      detail.get("sequence_length", 0),
                 "description": detail.get("description", ""),
-                "rel_type":    o.get("rel_type", ""),
+                "hog_level":   level,
                 "sequence":    detail.get("sequence", ""),
             })
-        columns = ["accession","organism","taxon_id","length","description","rel_type","sequence"]
+        columns = ["accession","organism","taxon_id","length","description","hog_level","sequence"]
         df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
         if not df.empty:
             df["has_afdb"] = df["accession"].apply(check_afdb)
@@ -219,8 +229,8 @@ def _():
         default_color,
         fetch_pdb,
         get_b_range,
+        get_hog_members,
         get_oma_protein,
-        get_orthologs_by_accession,
         parse_pdb_str,
         run_clustalo,
         search_uniprot,
@@ -315,12 +325,15 @@ def _(mo):
     mo.md(r"""
     ### Step 2 — Select orthologs to compare
 
-    The table below lists **orthologs** of the reference protein — proteins in other species
-    that descend from the same ancestral gene and perform the same biological role — as
-    inferred by [OMA](https://omabrowser.org) from genome-wide phylogenetic analysis. Unlike
-    matching on gene name, this finds true orthologs even when historical naming conventions
-    diverge across species. **Relation** shows whether the match is a clean 1:1 ortholog or
-    a 1:n relationship (the target species has additional in-paralogs).
+    The table below lists members of the reference protein's **HOG** (Hierarchical
+    Orthologous Group), as inferred by [OMA](https://omabrowser.org) from genome-wide
+    phylogenetic analysis. Unlike matching on gene name, this finds true orthologs even
+    when historical naming conventions diverge across species.
+
+    HOGs are defined at successive taxonomic levels — the deeper (more ancestral) the
+    level, the more distantly related species are included, down to highly divergent,
+    "twilight zone" sequence identities. Use the dropdown below to choose how far back
+    to search; the **Relation** column shows the level at which each member was included.
 
     Select **≥ 2 entries** (checkboxes) to include in the comparison. The **AF structure**
     column (✓/✗) indicates whether an AlphaFold prediction is available; include entries
@@ -330,9 +343,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(check_afdb, get_oma_protein, get_orthologs_by_accession, mo, search_table):
-    import pandas as _pd
-
+def _(get_oma_protein, mo, search_table):
     mo.stop(
         search_table.value is None or len(search_table.value) == 0,
         mo.callout(mo.md("Select a reference protein in the table above."), kind="info"),
@@ -341,33 +352,62 @@ def _(check_afdb, get_oma_protein, get_orthologs_by_accession, mo, search_table)
     ref_gene  = ref_entry["gene"]
     ref_acc   = ref_entry["accession"]
 
-    with mo.status.spinner(f"Searching orthologs of **{ref_acc}** via OMA…"):
+    ref_detail = get_oma_protein(ref_acc)
+    mo.stop(
+        ref_detail is None or not ref_detail.get("oma_hog_id"),
+        mo.callout(
+            mo.md(f"**{ref_acc}** is not covered by OMA's HOG database."),
+            kind="warn",
+        ),
+    )
+    _levels = ref_detail.get("hog_levels", [])
+    hog_level_dd = mo.ui.dropdown(
+        options=_levels,
+        value=_levels[-1] if _levels else None,
+        label="Search orthologs back to taxonomic level:",
+    )
+    mo.vstack([
+        mo.md(
+            f"Reference HOG: **{ref_detail['oma_hog_id']}**. "
+            "Deeper (more ancestral) levels include more distantly related orthologs."
+        ),
+        hog_level_dd,
+    ])
+    return hog_level_dd, ref_acc, ref_detail, ref_gene
+
+
+@app.cell(hide_code=True)
+def _(check_afdb, get_hog_members, hog_level_dd, mo, ref_acc, ref_detail):
+    import pandas as _pd
+
+    with mo.status.spinner(
+        f"Fetching HOG members of **{ref_acc}** at level **{hog_level_dd.value}**…"
+    ):
         try:
-            orthologs_df = get_orthologs_by_accession(ref_acc)
+            orthologs_df = get_hog_members(ref_detail["oma_hog_id"], hog_level_dd.value)
         except Exception as _e:
             mo.stop(True, mo.callout(
-                mo.md(f"OMA lookup failed for **{ref_acc}**: {_e}. "
-                      "This protein may not be covered by OMA's genome set."),
+                mo.md(f"OMA HOG lookup failed for **{ref_acc}**: {_e}."),
                 kind="warn",
             ))
-        _ref_detail = get_oma_protein(ref_acc)
 
-    if _ref_detail is not None:
-        _ref_row = _pd.DataFrame([{
-            "accession":   ref_acc,
-            "organism":    _ref_detail["species"]["species"],
-            "taxon_id":    str(_ref_detail["species"]["taxon_id"]),
-            "length":      _ref_detail.get("sequence_length", 0),
-            "description": _ref_detail.get("description", ref_entry["description"]),
-            "rel_type":    "reference",
-            "sequence":    _ref_detail.get("sequence", ""),
-            "has_afdb":    check_afdb(ref_acc),
-        }])
-        orthologs_df = _pd.concat([_ref_row, orthologs_df], ignore_index=True)
+    _ref_row = _pd.DataFrame([{
+        "accession":   ref_acc,
+        "organism":    ref_detail["species"]["species"],
+        "taxon_id":    str(ref_detail["species"]["taxon_id"]),
+        "length":      ref_detail.get("sequence_length", 0),
+        "description": ref_detail.get("description", ""),
+        "hog_level":   "reference",
+        "sequence":    ref_detail.get("sequence", ""),
+        "has_afdb":    check_afdb(ref_acc),
+    }])
+    orthologs_df = _pd.concat(
+        [_ref_row, orthologs_df[orthologs_df["accession"] != ref_acc]], ignore_index=True
+    )
 
     mo.stop(
         orthologs_df.empty,
-        mo.callout(mo.md(f"No orthologs found for **{ref_acc}** in OMA."), kind="warn"),
+        mo.callout(mo.md(f"No HOG members found for **{ref_acc}**."), kind="warn"),
     )
     display_df = orthologs_df.drop(columns=["sequence"]).copy()
     display_df["has_afdb"] = display_df["has_afdb"].map({True: "✓", False: "✗"})
@@ -377,10 +417,10 @@ def _(check_afdb, get_oma_protein, get_orthologs_by_accession, mo, search_table)
         "taxon_id":    "Taxon ID",
         "length":      "Length (aa)",
         "description": "Protein name",
-        "rel_type":    "Relation",
+        "hog_level":   "Relation",
         "has_afdb":    "AF structure",
     })
-    return display_df, orthologs_df, ref_acc, ref_gene
+    return display_df, orthologs_df
 
 
 @app.cell(hide_code=True)
